@@ -27,5 +27,5 @@ COPY --from=ui-build /build/dist/ui ./dist/ui
 RUN mkdir -p /data /backup && chown -R node:node /data /backup
 USER node
 
-EXPOSE 8080
+EXPOSE 8314
 CMD ["node", "src/main.ts"]

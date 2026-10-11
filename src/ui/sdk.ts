@@ -1,8 +1,6 @@
 /**
  * The ONLY file of the Connect UI that talks to the network: the Miniapp SDK client (`@opt2-tealbrick/miniapp-sdk/client`).
- * One local addition: person ops with `idempotency: "required"` (crud create) need an idempotency key, which the
- * SDK client's `callOp(op, input)` cannot send yet (REQUESTS `## connect: callOp idempotency key`). Those ops use the
- * SDK's own `tbFetch` with the documented body `{ input, idempotencyKey }` and the same `{ status, output }` answer.
+ * Person ops with `idempotency: "required"` (crud create) get a fresh idempotency key per user action (C41).
  */
 import { callOp as sdkCallOp, TbError, tbFetch, useSession } from "@opt2-tealbrick/miniapp-sdk/client";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
@@ -19,19 +17,11 @@ export const CREATE_OPS: ReadonlySet<string> = new Set([
   "buzz_profile_publish",
 ]);
 
-/** The body of a person op: `{ input }`, plus a fresh idempotency key for create ops. */
-export function buildOpBody(op: string, input: Json): { input: Json; idempotencyKey?: string } {
-  return CREATE_OPS.has(op) ? { input, idempotencyKey: globalThis.crypto.randomUUID() } : { input };
+/** Call options for a person op: a fresh idempotency key for create ops, none otherwise. */
+export function opOptions(op: string): { idempotencyKey?: string } {
+  return CREATE_OPS.has(op) ? { idempotencyKey: globalThis.crypto.randomUUID() } : {};
 }
 
-export async function callOp<O = Json>(op: string, input: Json): Promise<O> {
-  if (!CREATE_OPS.has(op)) return sdkCallOp<O>(op, input);
-  const res = await tbFetch(`tb/v1/ops/${encodeURIComponent(op)}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify(buildOpBody(op, input)),
-  });
-  const answer = (await res.json()) as { status?: string; output?: O };
-  if (answer?.status === "ok") return answer.output as O;
-  throw new TbError("op_not_completed", `operation ${op} did not complete (status ${String(answer?.status)})`, 502);
+export function callOp<O = Json>(op: string, input: Json): Promise<O> {
+  return sdkCallOp<O>(op, input, opOptions(op));
 }

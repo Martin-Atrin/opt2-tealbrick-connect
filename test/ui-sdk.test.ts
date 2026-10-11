@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildOpBody, CREATE_OPS } from "../src/ui/sdk.ts";
+import { CREATE_OPS, opOptions } from "../src/ui/sdk.ts";
 import { root } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as {
@@ -16,11 +16,10 @@ test("CREATE_OPS = exactly the person ops whose idempotency is required", () => 
   assert.deepEqual([...CREATE_OPS].sort(), required);
 });
 
-test("create ops get a fresh key; other ops send only { input }", () => {
-  const a = buildOpBody("account_connect", { service: "gmail" });
-  const b = buildOpBody("account_connect", { service: "gmail" });
-  assert.deepEqual(a.input, { service: "gmail" });
+test("create ops get a fresh key; other ops send none", () => {
+  const a = opOptions("account_connect");
+  const b = opOptions("account_connect");
   assert.match(a.idempotencyKey ?? "", /^[0-9a-f-]{36}$/u);
   assert.notEqual(a.idempotencyKey, b.idempotencyKey);
-  assert.deepEqual(buildOpBody("accounts_overview", {}), { input: {} });
+  assert.deepEqual(opOptions("accounts_overview"), {});
 });
