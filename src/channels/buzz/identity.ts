@@ -171,6 +171,22 @@ export class BuzzIdentities {
     return signEvent(secret, { ...input, created_at: Math.floor(this.#now() / 1000) });
   }
 
+  /** NIP-98 Authorization header signed by the agent's key for one relay HTTP request. */
+  authHeader(agent: string, input: { url: string; method: string; body?: string }): string {
+    const secret = this.#d.secrets.get(`${SECRET_PREFIX}${agent}`);
+    if (!secret) throw new Error("buzz_identity_missing");
+    return nip98Header(secret, { ...input, now: Math.floor(this.#now() / 1000) });
+  }
+
+  /** Relay HTTP base (`https://<relay host>`), checked against the outbound policy on every use. */
+  async relayHttpBase(): Promise<string> {
+    const relay = this.relayUrl();
+    if (!relay) throw new Error("buzz_relay_missing");
+    const base = relay.replace(/^wss:/u, "https:");
+    await assertEndpointAllowed(base, { schemes: ["https:"], ...this.#policy() });
+    return base;
+  }
+
   /** Publish the agent's kind 0 profile via the relay's HTTP endpoint (`POST https://<relay>/events`, NIP-98). */
   async publishProfile(agent: string, about = "Teal Brick agent"): Promise<BuzzIdentityView> {
     const identity = this.get(agent);

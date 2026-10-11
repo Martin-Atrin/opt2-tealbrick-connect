@@ -8,6 +8,7 @@ import type { AppDefinition, Db, DynamicHandlers, Handler, Json, OpContext, Publ
 
 import { type Account, AccountStore, CONNECTION_KINDS, type ConnectionKind } from "./accounts.ts";
 import { BuzzIdentities } from "./channels/buzz/identity.ts";
+import { BuzzRelay } from "./channels/buzz/relay.ts";
 import { SecretBox, SecretStore } from "./secrets.ts";
 import { ComposioClient, ComposioError, type ComposioToolkit } from "./sources/composio/client.ts";
 import { loadPolicies } from "./sources/composio/policy.ts";
@@ -64,6 +65,7 @@ interface Services {
   secrets: SecretStore;
   composio: ComposioSource;
   buzz: BuzzIdentities;
+  relay: BuzzRelay;
 }
 
 export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.account.connect" | "connect.account.disconnect" | "connect.buzz.generate" | "connect.buzz.rotate"> {
@@ -106,7 +108,8 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       ...(env.fetchImpl ? { fetchImpl: env.fetchImpl } : {}),
       ...(env.allowRelayOrigins ? { allowRelayOrigins: env.allowRelayOrigins } : {}),
     });
-    const built = { accounts, tools, secrets, composio, buzz };
+    const relay = new BuzzRelay(buzz, env.fetchImpl);
+    const built = { accounts, tools, secrets, composio, buzz, relay };
     cache = { db, services: built };
     return built;
   };
@@ -231,6 +234,36 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       const s = services(ctx.db, ctx.getKey);
       const identity = s.buzz.get(ctx.caller.id);
       return { npub: identity?.npub ?? null, pubkey: identity?.pubkey ?? null, relay: s.buzz.relayUrl() };
+    },
+
+    async buzz_channels(_input, ctx) {
+      return guard(async () => ({ channels: await services(ctx.db, ctx.getKey).relay.channels(ctx.caller.id) }));
+    },
+    async buzz_read(input, ctx) {
+      return guard(async () => {
+        const i = asInput(input);
+        const messages = await services(ctx.db, ctx.getKey).relay.read(ctx.caller.id, {
+          channel: String(i.channel ?? ""),
+          ...(typeof i.since === "number" ? { since: i.since } : {}),
+          ...(typeof i.limit === "number" ? { limit: i.limit } : {}),
+        });
+        return { untrusted: true, messages };
+      });
+    },
+    async buzz_post(input, ctx) {
+      return guard(async () => {
+        const i = asInput(input);
+        const channel = String(i.channel ?? "");
+        const replyTo = str(i.replyTo);
+        const root = str(i.threadRoot);
+        ctx.receipt.summary(`Buzz post to channel ${channel.slice(0, 8)}…`);
+        ctx.receipt.meta({ subjectKind: "as_itself", channel });
+        return services(ctx.db, ctx.getKey).relay.post(ctx.caller.id, {
+          channel,
+          content: String(i.content ?? ""),
+          ...(replyTo ? { replyTo: { id: replyTo, ...(root ? { root } : {}) } } : {}),
+        });
+      });
     },
 
     // ── person ops (app UI through the bridge launch) ──
