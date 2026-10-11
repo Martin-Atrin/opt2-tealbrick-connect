@@ -548,7 +548,7 @@
     {
       "id": "mcp_account_connect",
       "title": "Connect an MCP server",
-      "description": "Connect a remote MCP server (https) with optional auth headers. Headers stay in Connect.",
+      "description": "Connect a remote MCP server with optional auth headers or with its own sign-in (OAuth). Credentials stay in Connect.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -582,6 +582,12 @@
           "agent": {
             "type": "string",
             "maxLength": 64
+          },
+          "auth": {
+            "enum": [
+              "headers",
+              "oauth"
+            ]
           }
         }
       },
@@ -884,6 +890,10 @@
   "publicRoutes": [
     {
       "path": "/oauth/composio/callback",
+      "purpose": "oauth_callback"
+    },
+    {
+      "path": "/oauth/mcp/callback",
       "purpose": "oauth_callback"
     }
   ],

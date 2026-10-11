@@ -17,6 +17,7 @@ import { ComposioClient, ComposioError, type ComposioToolkit } from "./sources/c
 import { loadPolicies } from "./sources/composio/policy.ts";
 import { ComposioSource, connectMode } from "./sources/composio/source.ts";
 import { McpError } from "./sources/mcp/client.ts";
+import { OAuthError } from "./sources/mcp/oauth.ts";
 import { McpSource } from "./sources/mcp/source.ts";
 import { ACCOUNT_ARGUMENT, ToolRegistry } from "./tools.ts";
 import type { FetchLike } from "./util/http.ts";
@@ -25,6 +26,7 @@ import { NetPolicyError } from "./util/net-policy.ts";
 export const PRODUCT_SCOPE = "account";
 export const COMPOSIO_KEY = "COMPOSIO_API_KEY";
 export const COMPOSIO_CALLBACK_PATH = "/oauth/composio/callback";
+export const MCP_CALLBACK_PATH = "/oauth/mcp/callback";
 
 /** Error constructor with the SDK `TbError` shape; main.ts passes the SDK class so thrown errors map to the envelope. */
 export type ErrorCtor = new (code: string, message: string, httpStatus?: number) => Error;
@@ -125,6 +127,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       ...(env.catalogAllowOrigins ? { allowOrigins: env.catalogAllowOrigins } : {}),
     });
     const mcp = new McpSource({
+      db,
       accounts,
       tools,
       secrets,
@@ -143,6 +146,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       if (error instanceof ComposioError) fail(error.code, error.message, error.status);
       if (error instanceof NetPolicyError) fail(error.code, error.message, 422);
       if (error instanceof CatalogError) fail(error.code, error.message, error.code === "catalog_app_unknown" || error.code === "tool_unknown" ? 404 : 400);
+      if (error instanceof OAuthError) fail(error.code, error.message, 502);
       if (error instanceof McpError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
       if (error instanceof CatalogCallError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
       if (error instanceof Error && /^[a-z_]+(?::|$)/u.test(error.message)) fail(error.message.split(":")[0] ?? "connect_error", error.message, 400);
@@ -360,9 +364,21 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         if (!CONNECTION_KINDS.includes(kind)) fail("kind_invalid", "Kind must be as_me or as_itself.");
         const agent = str(i.agent) ?? null;
         if (kind === "as_itself" && !agentsOf(ctx.db).some((a) => a.id === agent)) fail("agent_unknown", "Pick the agent this account belongs to.");
+        const url = str(i.url) ?? fail("url_required", "Enter the MCP server address.");
+        if (i.auth === "oauth") {
+          const origin = extras(ctx).publicUrl ?? fail("public_origin_unknown", "The workspace door address is not known yet.", 503);
+          const started = await s.mcp.startOAuth({
+            label: str(i.label) ?? "MCP server",
+            url,
+            kind,
+            ownerAgent: kind === "as_itself" ? agent : null,
+            redirectUri: `${origin.replace(/\/+$/u, "")}/p/${env.manifest.id}${MCP_CALLBACK_PATH}`,
+          });
+          return { account: accountView(started.account), redirectUrl: started.redirectUrl };
+        }
         const account = await s.mcp.connect({
           label: str(i.label) ?? "MCP server",
-          url: str(i.url) ?? fail("url_required", "Enter the MCP server address."),
+          url,
           headers: (i.headers && typeof i.headers === "object" ? i.headers : {}) as Record<string, unknown>,
           kind,
           ownerAgent: kind === "as_itself" ? agent : null,
@@ -450,11 +466,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
   const composioCallback: PublicHandler = async (req, rawCtx) => {
     const ctx = rawCtx as SdkPublicContext;
     const url = new URL(req.url);
-    const page = (ok: boolean, title: string, detail: string, status: number) =>
-      new Response(
-        `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;padding:2rem"><h1>${title}</h1><p>${detail}</p><p>You can close this window.</p><script>window.opener&&window.opener.postMessage({connect:${ok ? "true" : "false"}},"*")</script></body>`,
-        { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } },
-      );
+    const page = callbackPage;
     try {
       const s = services(ctx);
       const workspaceId = ctx.workspace ?? fail("workspace_unknown", "The workspace id is not known yet.", 503);
@@ -472,11 +484,28 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     }
   };
 
+  const mcpCallback: PublicHandler = async (req, rawCtx) => {
+    const ctx = rawCtx as SdkPublicContext;
+    const url = new URL(req.url);
+    try {
+      const account = await services(ctx).mcp.completeOAuth({
+        state: url.searchParams.get("state"),
+        code: url.searchParams.get("code"),
+        error: url.searchParams.get("error"),
+      });
+      await ctx.scopes.instances.create(PRODUCT_SCOPE, account.id, account.label, account.ownerAgent ? { ownerAgent: account.ownerAgent as `agt_${string}` } : {});
+      return callbackPage(true, "Connected", `${escapeHtml(account.label)} is connected. Set each agent's access in Connect.`, 200);
+    } catch (error) {
+      ctx.log.warn("mcp oauth callback failed", { code: (error as { code?: string }).code ?? "error" });
+      return callbackPage(false, "Not connected", escapeHtml(error instanceof Error ? error.message : "The connection did not complete."), 400);
+    }
+  };
+
   return {
     manifest: env.manifest,
     handlers,
     dynamic: { tools: dynamicTools },
-    publicRoutes: { [COMPOSIO_CALLBACK_PATH]: composioCallback },
+    publicRoutes: { [COMPOSIO_CALLBACK_PATH]: composioCallback, [MCP_CALLBACK_PATH]: mcpCallback },
     migrations: env.migrationsDir,
     events: {
       async agentAdded(agent, ctx) {
@@ -489,6 +518,13 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       },
     },
   };
+}
+
+function callbackPage(ok: boolean, title: string, detail: string, status: number): Response {
+  return new Response(
+    `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;padding:2rem"><h1>${title}</h1><p>${detail}</p><p>You can close this window.</p><script>window.opener&&window.opener.postMessage({connect:${ok ? "true" : "false"}},"*")</script></body>`,
+    { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } },
+  );
 }
 
 function escapeHtml(value: string): string {

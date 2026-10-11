@@ -5,6 +5,7 @@
  * No stdio servers (Connect never starts local processes). MCP OAuth follows once the bridge public URL reaches apps.
  */
 import type { AppSecrets } from "@opt2-tealbrick/miniapp-sdk";
+import type { Db } from "@opt2-tealbrick/spec/sdk";
 
 import type { Account, AccountStore } from "../../accounts.ts";
 import { classifyMcpTool } from "../../effect.ts";
@@ -13,6 +14,14 @@ import type { FetchLike } from "../../util/http.ts";
 import { sha256Hex } from "../../util/ids.ts";
 import { assertEndpointAllowed, type Lookup } from "../../util/net-policy.ts";
 import { McpClient, McpError } from "./client.ts";
+import { authorization, discover, exchangeCode, type OAuthClient, type OAuthServer, type OAuthTokens, refresh, register } from "./oauth.ts";
+
+/** What Connect keeps per MCP account in ctx.secrets (one name per account). */
+type StoredAuth =
+  | { kind: "headers"; headers: Record<string, string> }
+  | { kind: "oauth"; server: OAuthServer; client: OAuthClient; redirectUri: string; verifier?: string; tokens?: OAuthTokens };
+
+export const OAUTH_STATE_TTL_MS = 30 * 60 * 1000;
 
 export const MAX_HEADERS = 10;
 const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/u;
@@ -40,6 +49,7 @@ export function mcpService(url: URL): string {
 }
 
 export interface McpDeps {
+  db: Db;
   accounts: AccountStore;
   tools: ToolRegistry;
   secrets: AppSecrets;
@@ -65,9 +75,81 @@ export class McpSource {
     return url;
   }
 
-  async #headers(account: Account): Promise<Record<string, string>> {
+  get #net() {
+    return {
+      ...(this.#d.fetchImpl ? { fetchImpl: this.#d.fetchImpl } : {}),
+      ...(this.#d.lookup ? { lookup: this.#d.lookup } : {}),
+      ...(this.#d.allowOrigins ? { allowOrigins: this.#d.allowOrigins } : {}),
+    };
+  }
+
+  async #stored(account: Account): Promise<StoredAuth> {
     const raw = await this.#d.secrets.get(`account:${account.id}`);
-    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    if (!raw) throw new McpError("mcp_credentials_missing", "The account has no stored credentials; connect it again.");
+    return JSON.parse(raw) as StoredAuth;
+  }
+
+  /** Request headers for an account; OAuth access tokens are refreshed 60 s before expiry (or when forced). */
+  async #headers(account: Account, forceRefresh = false): Promise<Record<string, string>> {
+    const stored = await this.#stored(account);
+    if (stored.kind === "headers") return stored.headers;
+    if (!stored.tokens) throw new McpError("mcp_oauth_incomplete", "Sign-in to this MCP server has not completed.");
+    let tokens = stored.tokens;
+    if (forceRefresh || (tokens.expiresAt !== null && tokens.expiresAt < Date.now() + 60_000)) {
+      if (!tokens.refreshToken) throw new McpError("mcp_oauth_expired", "The sign-in expired; connect the server again.");
+      tokens = await refresh(this.#net, stored.server, stored.client, tokens.refreshToken);
+      await this.#d.secrets.put(`account:${account.id}`, JSON.stringify({ ...stored, tokens }));
+    }
+    return { authorization: `Bearer ${tokens.accessToken}` };
+  }
+
+  /** Step 1 of an OAuth connect: discovery, client registration, pending account, one-time state. */
+  async startOAuth(input: { label: string; url: string; kind: "as_me" | "as_itself"; ownerAgent?: string | null; redirectUri: string }): Promise<{ account: Account; redirectUrl: string }> {
+    const url = await this.#checkedUrl(input.url);
+    const server = await discover(this.#net, url.toString());
+    if (!server) throw new McpError("mcp_oauth_not_required", "This server needs no sign-in; connect it without OAuth.");
+    const client = await register(this.#net, server, input.redirectUri, "Teal Brick Connect");
+    const auth = authorization(server, client, input.redirectUri);
+    const account = this.#d.accounts.create({
+      service: mcpService(url),
+      source: "mcp",
+      kind: input.kind,
+      label: input.label,
+      ownerAgent: input.ownerAgent ?? null,
+      externalRef: url.toString(),
+      status: "pending",
+    });
+    const stored: StoredAuth = { kind: "oauth", server, client, redirectUri: input.redirectUri, verifier: auth.verifier };
+    await this.#d.secrets.put(`account:${account.id}`, JSON.stringify(stored));
+    this.#d.db
+      .prepare("INSERT INTO connect_states (state_hash, account_id, purpose, expires_at) VALUES (?, ?, 'mcp_oauth', ?)")
+      .run(sha256Hex(auth.state), account.id, Date.now() + OAUTH_STATE_TTL_MS);
+    return { account, redirectUrl: auth.url };
+  }
+
+  /** Public callback: single-use state, code exchange with PKCE + resource, then tools are listed and registered. */
+  async completeOAuth(input: { state: string | null; code: string | null; error: string | null }): Promise<Account> {
+    if (!input.state) throw new McpError("connect_state_invalid", "The sign-in answer is missing its state.");
+    const hash = sha256Hex(input.state);
+    const row = this.#d.db.prepare("SELECT * FROM connect_states WHERE state_hash = ? AND purpose = 'mcp_oauth'").get(hash);
+    if (!row || row.consumed_at !== null || Number(row.expires_at) < Date.now()) throw new McpError("connect_state_invalid", "This sign-in link is unknown, used or expired. Start again.");
+    this.#d.db.prepare("UPDATE connect_states SET consumed_at = ? WHERE state_hash = ?").run(Date.now(), hash);
+    const account = this.#d.accounts.get(String(row.account_id));
+    if (account?.status !== "pending") throw new McpError("connect_state_invalid", "The pending connection no longer exists.");
+    try {
+      if (input.error || !input.code) throw new McpError("mcp_oauth_denied", `Sign-in was not completed${input.error ? ` (${input.error.slice(0, 60)})` : ""}.`);
+      const stored = await this.#stored(account);
+      if (stored.kind !== "oauth" || !stored.verifier) throw new McpError("connect_state_invalid", "The pending sign-in is incomplete.");
+      const tokens = await exchangeCode(this.#net, stored.server, stored.client, { code: input.code, verifier: stored.verifier, redirectUri: stored.redirectUri });
+      const { verifier: _used, ...rest } = stored;
+      await this.#d.secrets.put(`account:${account.id}`, JSON.stringify({ ...rest, tokens }));
+      const connected = this.#d.accounts.update(account.id, { status: "connected", detail: "" });
+      await this.syncTools(connected);
+      return connected;
+    } catch (error) {
+      this.#d.accounts.update(account.id, { status: "failed", detail: error instanceof Error ? error.message : "Sign-in failed." });
+      throw error;
+    }
   }
 
   async #client(url: string, headers: Record<string, string>): Promise<McpClient> {
@@ -96,7 +178,7 @@ export class McpSource {
       externalRef: url.toString(),
       status: "connected",
     });
-    await this.#d.secrets.put(`account:${account.id}`, JSON.stringify(headers));
+    await this.#d.secrets.put(`account:${account.id}`, JSON.stringify({ kind: "headers", headers } satisfies StoredAuth));
     this.#register(service, tools);
     return account;
   }
@@ -128,13 +210,22 @@ export class McpSource {
 
   async execute(account: Account, upstreamTool: string, args: Record<string, unknown>): Promise<unknown> {
     if (account.source !== "mcp" || account.status !== "connected" || !account.externalRef) throw new McpError("account_not_connected", "This account is not connected.");
-    const client = await this.#client(account.externalRef, await this.#headers(account));
+    const run = async (forceRefresh: boolean) => {
+      const client = await this.#client(account.externalRef as string, await this.#headers(account, forceRefresh));
+      try {
+        const result = await client.callTool(upstreamTool, args);
+        if (result.isError) throw new McpError("mcp_tool_error", JSON.stringify(result.content).slice(0, 500));
+        return { content: result.content, ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}) };
+      } finally {
+        await client.close();
+      }
+    };
     try {
-      const result = await client.callTool(upstreamTool, args);
-      if (result.isError) throw new McpError("mcp_tool_error", JSON.stringify(result.content).slice(0, 500));
-      return { content: result.content, ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}) };
-    } finally {
-      await client.close();
+      return await run(false);
+    } catch (error) {
+      const oauth = (await this.#stored(account)).kind === "oauth";
+      if (oauth && error instanceof McpError && error.code === "mcp_unauthorized") return run(true);
+      throw error;
     }
   }
 
