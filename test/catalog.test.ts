@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
 
-import { buildBundle, findForbidden, writeBundle } from "../scripts/catalog-build.ts";
+import { addForbiddenPatterns, buildBundle, findForbidden, writeBundle } from "../scripts/catalog-build.ts";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -41,10 +41,15 @@ test("build scrubs home-infrastructure values, drops provenance, is deterministi
   }
 });
 
+test("operator-specific host patterns can be added at build time", () => {
+  addForbiddenPatterns("# private list\n\\bbox-17\\b\n");
+  assert.equal(findForbidden("https://box-17.example.test"), "\\bbox-17\\b");
+});
+
 test("build refuses a spec that does not match its pin, and personal hosts inside a spec", () => {
   const spec = JSON.stringify({ openapi: "3.1.0" });
   const bad = fixture({ schema: 1, id: "demo", source: "openapi", openapi: { spec: "openapi.json", sha256: "0".repeat(64) } }, spec);
-  const leaky = JSON.stringify({ servers: [{ url: "https://neuu.my-tailnet.ts.net" }] });
+  const leaky = JSON.stringify({ servers: [{ url: "https://box.my-tailnet.ts.net" }] });
   const leak = fixture({ schema: 1, id: "demo", source: "openapi", openapi: { spec: "openapi.json", sha256: sha(leaky) } }, leaky);
   try {
     assert.throws(() => buildBundle(bad, "0.0.1"), /does not match pin/u);

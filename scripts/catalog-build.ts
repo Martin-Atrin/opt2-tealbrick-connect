@@ -18,17 +18,15 @@ import { gzipSync } from "node:zlib";
 
 export const CATALOG_FORMAT = "tealbrick.catalog/1";
 
-/** Personal / home-infrastructure patterns that must never reach a public artifact. */
-export const FORBIDDEN_PATTERNS: readonly RegExp[] = [
-  /\.ts\.net\b/iu,
-  /tailnet/iu,
-  /\bfedora-n150\b/iu,
-  /\bnuclab\b/iu,
-  /\bneuu\b/iu,
-  /\bfed-main\b/iu,
-  /\bhenry\b/iu,
-  /\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b/u,
-];
+/**
+ * Home-infrastructure patterns that must never reach a public artifact. Generic patterns live here; operator-specific
+ * host names are passed at build time with `--forbid-file <path>` (one regex per line, kept outside this repo).
+ */
+export const FORBIDDEN_PATTERNS: RegExp[] = [/\.ts\.net\b/iu, /tailnet/iu, /\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b/u];
+
+export function addForbiddenPatterns(lines: string): void {
+  for (const line of lines.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"))) FORBIDDEN_PATTERNS.push(new RegExp(line, "iu"));
+}
 
 export interface CatalogEntryFile {
   name: string;
@@ -111,9 +109,12 @@ export function writeBundle(bundle: CatalogBundle, outDir: string): { file: stri
 }
 
 if (import.meta.main) {
-  const { values } = parseArgs({ options: { from: { type: "string" }, version: { type: "string" }, out: { type: "string", default: "dist/catalog" } } });
+  const { values } = parseArgs({
+    options: { from: { type: "string" }, version: { type: "string" }, out: { type: "string", default: "dist/catalog" }, "forbid-file": { type: "string" } },
+  });
+  if (values["forbid-file"]) addForbiddenPatterns(readFileSync(resolve(values["forbid-file"]), "utf8"));
   if (!values.from || !values.version) {
-    console.error("usage: node scripts/catalog-build.ts --from <dir> --version <semver> [--out dist/catalog]");
+    console.error("usage: node scripts/catalog-build.ts --from <dir> --version <semver> [--out dist/catalog] [--forbid-file <path>]");
     process.exit(2);
   }
   const bundle = buildBundle(resolve(values.from), values.version);

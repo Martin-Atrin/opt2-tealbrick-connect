@@ -33,3 +33,6 @@ secrets/
 
 # opt2 CI runner scratch
 .tb-ci/
+
+# docs CLI session scratch
+.docs-session/

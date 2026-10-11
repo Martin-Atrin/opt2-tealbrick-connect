@@ -60,18 +60,19 @@ function view(row: Record<string, unknown>): BuzzIdentityView {
   };
 }
 
-/** `wss://host[:port]` only (no path, query, userinfo); returns the normalized URL. */
-export function normalizeRelayUrl(value: string): string {
+/** `wss://host[:port]` only (no path, query, userinfo); `ws://` only for an exact allowlisted test origin. */
+export function normalizeRelayUrl(value: string, allowOrigins: readonly string[] = []): string {
   let url: URL;
   try {
     url = new URL(value.trim());
   } catch {
     throw new Error("relay_url_invalid");
   }
-  if (url.protocol !== "wss:" || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
+  const testOrigin = url.protocol === "ws:" && allowOrigins.includes(url.origin);
+  if ((url.protocol !== "wss:" && !testOrigin) || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
     throw new Error("relay_url_invalid");
   }
-  return `wss://${url.host}`;
+  return `${url.protocol}//${url.host}`;
 }
 
 export class BuzzIdentities {
@@ -149,7 +150,7 @@ export class BuzzIdentities {
   }
 
   async setRelayUrl(value: string): Promise<string> {
-    const relay = normalizeRelayUrl(value);
+    const relay = normalizeRelayUrl(value, this.#d.allowRelayOrigins);
     await assertEndpointAllowed(relay, { schemes: ["wss:"], ...this.#policy() });
     this.#d.db
       .prepare(
@@ -185,7 +186,7 @@ export class BuzzIdentities {
   async relayHttpBase(): Promise<string> {
     const relay = this.relayUrl();
     if (!relay) throw new Error("buzz_relay_missing");
-    const base = relay.replace(/^wss:/u, "https:");
+    const base = relay.replace(/^wss:/u, "https:").replace(/^ws:/u, "http:");
     await assertEndpointAllowed(base, { schemes: ["https:"], ...this.#policy() });
     return base;
   }
@@ -194,10 +195,7 @@ export class BuzzIdentities {
   async publishProfile(agent: string, about = "Teal Brick agent"): Promise<BuzzIdentityView> {
     const identity = this.get(agent);
     if (!identity) throw new Error("buzz_identity_missing");
-    const relay = this.relayUrl();
-    if (!relay) throw new Error("buzz_relay_missing");
-    const httpUrl = `${relay.replace(/^wss:/u, "https:")}/events`;
-    await assertEndpointAllowed(httpUrl, { schemes: ["https:"], ...this.#policy() });
+    const httpUrl = `${await this.relayHttpBase()}/events`;
     const event = await this.sign(agent, {
       kind: 0,
       tags: [],
