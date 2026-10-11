@@ -1,18 +1,30 @@
 {
   "name": "@opt2-tealbrick/connect",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Teal Brick Connect miniapp: Composio, MCP connectors, Tealbrick catalog, Channels. Built on the Miniapp SDK.",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
+    "start": "node src/main.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "biome check .",
     "test": "node --test 'test/**/*.test.ts'",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "conformance": "node scripts/conformance.ts",
+    "catalog:build": "node scripts/catalog-build.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.0/opt2-tealbrick-spec-0.1.0.tgz"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
-    "typescript": "^5.9.0"
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "24.19.2",
+    "ajv": "8.20.0",
+    "typescript": "7.0.2"
   }
 }

@@ -24,16 +24,25 @@ Woodpecker CI (shared opt2 pipeline template from `opt2-tealbrick-platform`).
 
 New code is TypeScript (Node 24+). Swift only where the macOS app requires it.
 
-## Layout (P0 scaffold; built in P1 on the frozen Miniapp SDK)
+## Layout
 
 | Path | Concern |
 |---|---|
-| `src/accounts/` | Connected accounts per agent and service. Tier per account: READ, READ/UPDATE (incl. create/send), READ/UPDATE/DELETE. Kind: "as me" or "as itself". |
-| `src/sources/composio/` | Composio toolkits, auth configs, connected accounts, tool execution. |
-| `src/sources/mcp/` | Custom and third-party remote MCP servers (client, outbound URL policy). |
-| `src/sources/catalog/` | Tealbrick catalog: sha256-pinned OpenAPI specs with effect labels. |
-| `src/oauth/` | MCP OAuth (RFC 9728, 8414, 7591, PKCE) and our own OAuth flows. |
-| `src/channels/` | Buzz (one identity per agent), then Slack, Teams, Telegram, Discord. |
-| `src/ui/` | Person UI opened through the bridge. |
+| `tealbrick.manifest.json` | The only description of the app (operations, `account` scope with tiers, key requirement, public route, catalog artifact pin). |
+| `src/app.ts` | App definition for the Miniapp SDK: one handler per operation, the dynamic `tools` family, the Composio callback, events. |
+| `src/accounts.ts` | Connected accounts (several per service). Per-agent access lives in the SDK scope store: READ, READ/UPDATE (incl. create/send), READ/UPDATE/DELETE. Kind "as me" or "as itself". |
+| `src/tools.ts`, `src/effect.ts` | Tool registry behind `connect__tools_search` / `connect__tools_call`; effect and tier classification. |
+| `src/sources/composio/` | Composio client (key only to `*.composio.dev`), verified connect flow, tool sync, policies (`policies/composio/`). |
+| `src/channels/buzz/` | One Buzz (Nostr) identity per agent, created for all agents in one owner action; sealed keys; allowlisted signing. |
+| `src/secrets.ts` | Sealed app secrets (AES-256-GCM, AAD = name). |
+| `scripts/catalog-build.ts` | Builds the Tealbrick catalog artifact (sha256-pinned, scrubbed) attached to a GitHub release. |
+| `scripts/conformance.ts` | Interim conformance until the released suite exists. |
 
-Run the tests: `npm test` (Node 24 runs TypeScript directly).
+## Develop
+
+```sh
+npm ci
+npm run typecheck && npm run lint && npm test && npm run conformance
+```
+
+Node 24 runs the TypeScript sources directly (`node src/main.ts`). The app starts only on `@opt2-tealbrick/miniapp-sdk`.

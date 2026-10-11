@@ -1,0 +1,309 @@
+{
+  "$schema": "https://spec.opt2.tealbrick.com/manifest.schema.json",
+  "schema": "tealbrick.miniapp/2",
+  "id": "connect",
+  "name": "Connect",
+  "summary": "Connect your agents to the services you use: Gmail and 1,000+ apps through Composio, self-hosted apps, MCP servers and team chat.",
+  "description": "Connect holds all outside connectivity for your agents.\n\n- **Services:** search a service, press Connect, sign in. Several accounts per service (for example two Gmail inboxes).\n- **Access per account and agent:** READ, READ/UPDATE (includes create and send) or READ/UPDATE/DELETE.\n- **As me or as itself:** an agent can use your account, or its own identity (for example its own Buzz identity).\n- **Channels:** Buzz identities for all your agents in one step.\n\nOutward and destructive actions follow your agent policy: held for your approval or recorded as receipts.",
+  "version": "0.1.0",
+  "sdkMajor": 1,
+  "publisher": { "name": "Teal Brick", "url": "https://tealbrick.com" },
+  "source": { "repo": "https://github.com/Martin-Atrin/opt2-tealbrick-connect", "license": "MIT" },
+  "icon": { "svgPath": "M8 12h8 M7 8a4 4 0 0 0 0 8h2 M17 8a4 4 0 0 1 0 8h-2", "viewBox": "0 0 24 24" },
+  "discovery": {
+    "category": "connectivity",
+    "intents": [
+      "connect gmail",
+      "connect my email",
+      "read my inbox",
+      "send email from my agent",
+      "connect my calendar",
+      "connect slack",
+      "connect apps to my agent",
+      "add integrations",
+      "connect composio",
+      "connect an mcp server",
+      "give my agent access to a service",
+      "connect self-hosted apps",
+      "add buzz identities",
+      "let my agents chat",
+      "team chat for agents"
+    ],
+    "keywords": ["integrations", "connectors", "composio", "oauth", "mcp", "gmail", "calendar", "buzz", "nostr", "channels"]
+  },
+  "runtime": {
+    "build": { "context": ".", "dockerfile": "Dockerfile" },
+    "port": 8080,
+    "healthPath": "/tb/v1/health",
+    "resources": { "cpu": 0.5, "memoryMb": 512 },
+    "volumes": [
+      { "id": "data", "mountPath": "/data", "sizeGb": 2, "purpose": "data" },
+      { "id": "backup", "mountPath": "/backup", "sizeGb": 5, "purpose": "backup" }
+    ],
+    "env": []
+  },
+  "operations": [
+    {
+      "id": "tools",
+      "title": "Connected service tools",
+      "description": "Search and call the tools of the services connected for you (Gmail, Calendar, and more). Search first, then call one tool with its arguments. When you have several accounts of a service, pass connect_account.",
+      "crud": ["read"],
+      "effect": "read",
+      "scopeType": "account",
+      "idempotency": "supported",
+      "receipt": false,
+      "audience": "agent",
+      "dynamic": { "mode": "search", "crudCeiling": ["read", "create", "update", "delete"], "effectCeiling": "money" }
+    },
+    {
+      "id": "accounts_list",
+      "title": "List my connected accounts",
+      "description": "List the connected accounts you may use, with your access level for each.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "service": { "type": "string", "maxLength": 64 } }
+      },
+      "output": {
+        "type": "object",
+        "required": ["accounts"],
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "label", "service", "kind", "access"],
+              "properties": {
+                "id": { "type": "string" },
+                "label": { "type": "string" },
+                "service": { "type": "string" },
+                "kind": { "enum": ["as_me", "as_itself"] },
+                "access": { "enum": ["read", "read_update", "read_update_delete"] }
+              }
+            }
+          }
+        }
+      },
+      "crud": ["read"],
+      "effect": "read",
+      "scopeType": "account",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "buzz_identity",
+      "title": "My Buzz identity",
+      "description": "Your own Buzz (Nostr) identity: npub and relay. The owner adds this npub to Buzz channels.",
+      "input": { "type": "object", "additionalProperties": false, "properties": {} },
+      "output": {
+        "type": "object",
+        "required": ["npub", "pubkey", "relay"],
+        "properties": {
+          "npub": { "type": ["string", "null"] },
+          "pubkey": { "type": ["string", "null"] },
+          "relay": { "type": ["string", "null"] }
+        }
+      },
+      "crud": ["read"],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "services_search",
+      "title": "Search services",
+      "description": "Search the services you can connect.",
+      "input": { "type": "object", "additionalProperties": false, "properties": { "query": { "type": "string", "maxLength": 80 } } },
+      "output": { "type": "object" },
+      "crud": ["read"],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "accounts_overview",
+      "title": "All connected accounts",
+      "description": "Every account in this workspace with its status.",
+      "input": { "type": "object", "additionalProperties": false, "properties": {} },
+      "output": { "type": "object" },
+      "crud": ["read"],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "account_connect",
+      "title": "Connect an account",
+      "description": "Start connecting an account of a service; returns the sign-in address for the popup.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["service", "label"],
+        "properties": {
+          "service": { "type": "string", "maxLength": 64 },
+          "label": { "type": "string", "maxLength": 60 },
+          "kind": { "enum": ["as_me", "as_itself"] },
+          "agent": { "type": "string", "maxLength": 64 }
+        }
+      },
+      "output": { "type": "object" },
+      "crud": ["create"],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "account_update",
+      "title": "Rename an account",
+      "description": "Change the label of a connected account.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label"],
+        "properties": { "id": { "type": "string" }, "label": { "type": "string", "maxLength": 60 } }
+      },
+      "output": { "type": "object" },
+      "crud": ["update"],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "account_disconnect",
+      "title": "Disconnect an account",
+      "description": "Disconnect an account. Agents lose access to it at once.",
+      "input": { "type": "object", "additionalProperties": false, "required": ["id"], "properties": { "id": { "type": "string" } } },
+      "output": { "type": "object" },
+      "crud": ["update"],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "tools_refresh",
+      "title": "Refresh tools",
+      "description": "Reload the tool list of a connected service.",
+      "input": { "type": "object", "additionalProperties": false, "required": ["service"], "properties": { "service": { "type": "string", "maxLength": 64 } } },
+      "output": { "type": "object" },
+      "crud": ["update"],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "buzz_identities_list",
+      "title": "Buzz identities",
+      "description": "Agents with their Buzz identities and the relay.",
+      "input": { "type": "object", "additionalProperties": false, "properties": {} },
+      "output": { "type": "object" },
+      "crud": ["read"],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "buzz_identities_generate",
+      "title": "Create Buzz identities for all agents",
+      "description": "One step: create a Buzz identity for every agent that has none.",
+      "input": { "type": "object", "additionalProperties": false, "properties": {} },
+      "output": { "type": "object" },
+      "crud": ["create"],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "buzz_identity_rotate",
+      "title": "Replace a Buzz identity",
+      "description": "Replace one agent's Buzz key. The old identity stops working.",
+      "input": { "type": "object", "additionalProperties": false, "required": ["agent"], "properties": { "agent": { "type": "string" } } },
+      "output": { "type": "object" },
+      "crud": ["update"],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "buzz_relay_set",
+      "title": "Set the Buzz relay",
+      "description": "Set the address of your Buzz relay (wss://).",
+      "input": { "type": "object", "additionalProperties": false, "required": ["relayUrl"], "properties": { "relayUrl": { "type": "string", "maxLength": 300 } } },
+      "output": { "type": "object" },
+      "crud": ["update"],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "buzz_profile_publish",
+      "title": "Publish Buzz profiles",
+      "description": "Publish the agents' names as Buzz profiles on your relay.",
+      "input": { "type": "object", "additionalProperties": false, "properties": { "agent": { "type": "string" } } },
+      "output": { "type": "object" },
+      "crud": ["create"],
+      "effect": "outward",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "person"
+    }
+  ],
+  "scopes": [
+    {
+      "type": "account",
+      "label": "Connected account",
+      "labelPlural": "Connected accounts",
+      "access": [
+        { "id": "read", "label": "READ", "crud": ["read"] },
+        { "id": "read_update", "label": "READ/UPDATE", "crud": ["read", "create", "update"] },
+        { "id": "read_update_delete", "label": "READ/UPDATE/DELETE", "crud": ["read", "create", "update", "delete"] }
+      ],
+      "defaultGrants": [],
+      "summaryTemplate": "{count} {labelPlural}"
+    }
+  ],
+  "settings": {
+    "steps": [],
+    "keys": [
+      {
+        "name": "COMPOSIO_API_KEY",
+        "label": "Composio API key",
+        "provider": "Composio",
+        "help": "Connects Gmail, Calendar and 1,000+ other services. Create a key in your Composio dashboard. Teal Brick Portal never sees it.",
+        "required": false,
+        "source": "account_default",
+        "usedBy": ["app"]
+      }
+    ]
+  },
+  "skills": [
+    { "id": "connect-tools", "title": "Using connected services", "file": "skills/connect-tools/SKILL.md" }
+  ],
+  "harnessHints": [
+    { "harness": "generic", "instructions": "Use connect__tools_search to find a tool of a connected service, then connect__tools_call. If a call is held, poll connect__tb_hold_status and repeat the same call after approval." }
+  ],
+  "backups": { "schedule": "23 3 * * *", "retain": 14 },
+  "artifacts": [
+    {
+      "id": "catalog",
+      "version": "0.1.0",
+      "sha256": "c366f737c80d787ca5364ca6af7e20b96d113ed4ba46c57ee610ca7fbc81d2e2",
+      "url": "https://github.com/Martin-Atrin/opt2-tealbrick-connect/releases/download/catalog-v0.1.0/tealbrick-catalog-0.1.0.json.gz"
+    }
+  ],
+  "publicRoutes": [
+    { "path": "/oauth/composio/callback", "purpose": "oauth_callback" }
+  ],
+  "ui": { "launchPath": "/", "configurePath": "/configure" }
+}

@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "toolkit": "gmail",
+  "version": "2026-10-11",
+  "notes": "Outward: anything that sends mail to people. Destructive: deletes, trash and permanent removal. Writes: drafts, labels, moves and settings that stay inside the mailbox.",
+  "destructive": ["GMAIL_*DELETE*", "GMAIL_*TRASH*", "GMAIL_*PURGE*"],
+  "outward": ["GMAIL_*SEND*", "GMAIL_*REPLY*", "GMAIL_*FORWARD*"],
+  "writes": ["GMAIL_*CREATE*", "GMAIL_*DRAFT*", "GMAIL_*LABEL*", "GMAIL_*MODIFY*", "GMAIL_*MOVE*", "GMAIL_*PATCH*", "GMAIL_*UPDATE*", "GMAIL_*ADD*", "GMAIL_*REMOVE*", "GMAIL_*MARK*", "GMAIL_*SETTINGS*", "GMAIL_*IMPORT*", "GMAIL_*INSERT*", "GMAIL_*WATCH*", "GMAIL_*STOP*", "GMAIL_*UNTRASH*", "GMAIL_*BATCH*"],
+  "reads": ["GMAIL_FETCH_*", "GMAIL_GET_*", "GMAIL_LIST_*", "GMAIL_SEARCH_*"]
+}

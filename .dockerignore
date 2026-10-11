@@ -1,0 +1,9 @@
+node_modules
+dist
+test
+scripts
+.git
+.woodpecker
+.tb-ci
+*.md
+!skills/**/*.md

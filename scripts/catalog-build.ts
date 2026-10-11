@@ -1,0 +1,122 @@
+/**
+ * Build the Tealbrick catalog artifact (Company Box seed, HARVEST §D) from a source catalog directory.
+ *
+ *   node scripts/catalog-build.ts --from <dir> --version <semver> [--out dist/catalog]
+ *
+ * - Verifies every spec / overlay against the sha256 pinned in its entry.json (refuses on mismatch).
+ * - Scrubs home-infrastructure values: `baseUrlExample` → https://<id>.example.com, instance-captured
+ *   `app.specSource` → "instance-capture"; PROVENANCE.md and coverage files are not shipped.
+ * - Refuses to write when any personal host pattern remains anywhere in the bundle.
+ * - Output: `tealbrick-catalog-<version>.json.gz` (deterministic gzip of one JSON document) + `.sha256`.
+ * The artifact is attached to a GitHub release of this repo and pinned in the manifest `artifacts[]`.
+ */
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { parseArgs } from "node:util";
+import { gzipSync } from "node:zlib";
+
+export const CATALOG_FORMAT = "tealbrick.catalog/1";
+
+/** Personal / home-infrastructure patterns that must never reach a public artifact. */
+export const FORBIDDEN_PATTERNS: readonly RegExp[] = [
+  /\.ts\.net\b/iu,
+  /tailnet/iu,
+  /\bfedora-n150\b/iu,
+  /\bnuclab\b/iu,
+  /\bneuu\b/iu,
+  /\bfed-main\b/iu,
+  /\bhenry\b/iu,
+  /\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b/u,
+];
+
+export interface CatalogEntryFile {
+  name: string;
+  sha256: string;
+  content: string;
+}
+export interface CatalogBundleEntry {
+  id: string;
+  entry: Record<string, unknown>;
+  files: CatalogEntryFile[];
+}
+export interface CatalogBundle {
+  format: typeof CATALOG_FORMAT;
+  version: string;
+  entries: CatalogBundleEntry[];
+}
+
+const sha256 = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
+
+export function findForbidden(text: string): string | null {
+  for (const pattern of FORBIDDEN_PATTERNS) {
+    if (pattern.test(text)) return pattern.source;
+  }
+  return null;
+}
+
+function scrubEntry(raw: Record<string, unknown>): Record<string, unknown> {
+  const entry = structuredClone(raw);
+  const id = String(entry.id);
+  if (typeof entry.baseUrlExample === "string") entry.baseUrlExample = `https://${id}.example.com`;
+  const app = entry.app as Record<string, unknown> | undefined;
+  if (app && typeof app.specSource === "string" && findForbidden(app.specSource)) app.specSource = "instance-capture";
+  return entry;
+}
+
+function readPinned(dir: string, file: string, pin: string): CatalogEntryFile {
+  if (!/^[a-z0-9._-]+(?:\/[a-z0-9._-]+)*$/iu.test(file) || file.includes("..")) throw new Error(`${dir}: unsafe file name ${file}`);
+  const bytes = readFileSync(join(dir, file));
+  const actual = sha256(bytes);
+  if (actual !== pin) throw new Error(`${dir}/${file}: sha256 ${actual} does not match pin ${pin}`);
+  return { name: file, sha256: actual, content: bytes.toString("utf8") };
+}
+
+export function buildBundle(fromDir: string, version: string): CatalogBundle {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(version)) throw new Error(`invalid version ${version}`);
+  const entries: CatalogBundleEntry[] = [];
+  for (const name of readdirSync(fromDir).sort()) {
+    const dir = join(fromDir, name);
+    if (!statSync(dir).isDirectory() || !existsSync(join(dir, "entry.json"))) continue;
+    const raw = JSON.parse(readFileSync(join(dir, "entry.json"), "utf8")) as Record<string, unknown>;
+    if (raw.schema !== 1 || raw.id !== name) throw new Error(`${dir}: entry schema/id invalid`);
+    const files: CatalogEntryFile[] = [];
+    const openapi = raw.openapi as { spec?: string; sha256?: string; overlay?: { file: string; sha256: string } } | undefined;
+    if (raw.source === "openapi") {
+      if (!openapi?.spec || !openapi.sha256) throw new Error(`${dir}: openapi spec pin missing`);
+      files.push(readPinned(dir, openapi.spec, openapi.sha256));
+      if (openapi.overlay) files.push(readPinned(dir, openapi.overlay.file, openapi.overlay.sha256));
+    } else {
+      throw new Error(`${dir}: unsupported source ${String(raw.source)}`);
+    }
+    entries.push({ id: name, entry: scrubEntry(raw), files });
+  }
+  if (entries.length === 0) throw new Error(`no catalog entries in ${fromDir}`);
+  const bundle: CatalogBundle = { format: CATALOG_FORMAT, version, entries };
+  for (const entry of bundle.entries) {
+    const hit = findForbidden(JSON.stringify(entry.entry)) ?? entry.files.map((f) => findForbidden(f.content)).find(Boolean) ?? null;
+    if (hit) throw new Error(`${entry.id}: personal host pattern remains (${hit})`);
+  }
+  return bundle;
+}
+
+export function writeBundle(bundle: CatalogBundle, outDir: string): { file: string; sha256: string; bytes: number } {
+  mkdirSync(outDir, { recursive: true });
+  const gz = gzipSync(Buffer.from(JSON.stringify(bundle)), { level: 9 });
+  const file = join(outDir, `tealbrick-catalog-${bundle.version}.json.gz`);
+  const digest = sha256(gz);
+  writeFileSync(file, gz);
+  writeFileSync(`${file}.sha256`, `${digest}  tealbrick-catalog-${bundle.version}.json.gz\n`);
+  return { file, sha256: digest, bytes: gz.byteLength };
+}
+
+if (import.meta.main) {
+  const { values } = parseArgs({ options: { from: { type: "string" }, version: { type: "string" }, out: { type: "string", default: "dist/catalog" } } });
+  if (!values.from || !values.version) {
+    console.error("usage: node scripts/catalog-build.ts --from <dir> --version <semver> [--out dist/catalog]");
+    process.exit(2);
+  }
+  const bundle = buildBundle(resolve(values.from), values.version);
+  const result = writeBundle(bundle, resolve(values.out));
+  console.log(JSON.stringify({ entries: bundle.entries.map((e) => e.id), ...result }, null, 2));
+}
