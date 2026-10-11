@@ -10,21 +10,28 @@
   },
   "scripts": {
     "start": "node src/main.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/ui/tsconfig.json",
     "lint": "biome check .",
     "test": "node --test 'test/**/*.test.ts'",
     "conformance": "node scripts/conformance.ts",
-    "catalog:build": "node scripts/catalog-build.ts"
+    "catalog:build": "node scripts/catalog-build.ts",
+    "build": "vite build --config vite.config.ts"
   },
   "dependencies": {
     "@noble/curves": "2.4.0",
     "@noble/hashes": "2.4.0",
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.0/opt2-tealbrick-spec-0.1.0.tgz"
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.0/opt2-tealbrick-spec-0.1.0.tgz",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
     "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
     "ajv": "8.20.0",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
   }
 }
