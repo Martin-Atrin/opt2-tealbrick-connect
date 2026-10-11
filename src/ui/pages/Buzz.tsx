@@ -1,3 +1,4 @@
+import { Button } from "@opt2-tealbrick/ui";
 import { type FormEvent, useEffect, useId, useState } from "react";
 
 import { ConfirmDialog, Notice } from "../components.tsx";
@@ -84,29 +85,29 @@ export function Buzz() {
           <label htmlFor={relayId}>Buzz relay address</label>
           <div className="row">
             <input id={relayId} className="grow" value={relay} onChange={(e) => setRelay(e.target.value)} placeholder="wss://relay.example.com" inputMode="url" autoComplete="off" spellCheck={false} maxLength={300} />
-            <button type="submit" className="btn" disabled={busy !== null}>
+            <Button type="submit" variant="secondary" disabled={busy !== null}>
               Save relay
-            </button>
+            </Button>
           </div>
         </div>
       </form>
 
       <div className="row actions">
-        <button type="button" className="btn btn-primary" disabled={busy !== null || rows.length === 0} onClick={() => void generate()}>
+        <Button type="button" variant="primary" disabled={busy !== null || rows.length === 0} onClick={() => void generate()}>
           Create Buzz identities for all agents
-        </button>
-        <button type="button" className="btn" disabled={withIdentity.length === 0} onClick={() => void copyAll()}>
+        </Button>
+        <Button type="button" variant="secondary" disabled={withIdentity.length === 0} onClick={() => void copyAll()}>
           Copy all npubs
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className="btn"
+          variant="secondary"
           disabled={busy !== null || withIdentity.length === 0 || !savedRelay}
           title={savedRelay ? undefined : "Save the relay address first"}
           onClick={() => void publish()}
         >
           Publish profiles
-        </button>
+        </Button>
       </div>
 
       {list.loading && !list.data ? <p className="muted">Loading agents.</p> : null}
@@ -142,9 +143,9 @@ export function Buzz() {
                   <td data-label={row.identity ? "Created" : ""}>{row.identity ? formatCreated(row.identity.createdAt) : ""}</td>
                   <td data-label="">
                     {row.identity ? (
-                      <button type="button" className="btn btn-danger-outline" disabled={busy !== null} onClick={() => setRotating({ agent: row.agent, name: row.name })} aria-label={`Replace key of ${row.name}`}>
+                      <Button type="button" variant="danger" disabled={busy !== null} onClick={() => setRotating({ agent: row.agent, name: row.name })} aria-label={`Replace key of ${row.name}`}>
                         Replace key
-                      </button>
+                      </Button>
                     ) : null}
                   </td>
                 </tr>
@@ -174,9 +175,9 @@ export function Buzz() {
 function CopyButton({ text, label }: { text: string; label: string }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   return (
-    <button
+    <Button
       type="button"
-      className="btn btn-small"
+      variant="secondary" size="sm"
       aria-label={label}
       onClick={async () => {
         setState((await copyText(text)) ? "copied" : "failed");
@@ -184,6 +185,6 @@ function CopyButton({ text, label }: { text: string; label: string }) {
       }}
     >
       {state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy"}
-    </button>
+    </Button>
   );
 }

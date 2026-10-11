@@ -1,47 +1,51 @@
-import { type ReactNode, useEffect, useRef } from "react";
+import { Button, Dialog, Tag, type Tone, Notice as UiNotice } from "@opt2-tealbrick/ui";
+import type { ReactNode } from "react";
 
 import type { AccountKind, AccountStatus } from "./ops.ts";
 
-/** Status is always a text label, never a dot or an icon. */
-const STATUS_LABEL: Record<AccountStatus, string> = { pending: "Pending", connected: "Connected", failed: "Failed", revoked: "Disconnected" };
+/** Status is always a text label (ui Tag), never a dot. */
+const STATUS: Record<AccountStatus, { label: string; tone: Tone }> = {
+  pending: { label: "Pending", tone: "progress" },
+  connected: { label: "Connected", tone: "ok" },
+  failed: { label: "Failed", tone: "blocked" },
+  revoked: { label: "Disconnected", tone: "neutral" },
+};
 
 export function StatusLabel({ status }: { status: AccountStatus }) {
-  return <span className={`status status-${status}`}>{STATUS_LABEL[status]}</span>;
+  return <Tag tone={STATUS[status].tone}>{STATUS[status].label}</Tag>;
 }
 
 export function KindBadge({ kind }: { kind: AccountKind }) {
-  return <span className="badge">{kind === "as_itself" ? "As itself" : "As me"}</span>;
+  return <Tag tone="neutral">{kind === "as_itself" ? "As itself" : "As me"}</Tag>;
 }
 
 export function Notice({ tone = "info", children }: { tone?: "info" | "error"; children: ReactNode }) {
   return (
-    <p className={`notice notice-${tone}`} role={tone === "error" ? "alert" : "status"}>
+    <UiNotice tone={tone === "error" ? "action" : "ok"} role={tone === "error" ? "alert" : "status"}>
       {children}
-    </p>
+    </UiNotice>
   );
 }
 
 export function ConfirmDialog(props: { open: boolean; title: string; body: ReactNode; confirmLabel: string; busy?: boolean; onConfirm(): void; onCancel(): void }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  const { open } = props;
-  useEffect(() => {
-    const dialog = ref.current;
-    if (!dialog) return;
-    if (open && !dialog.open) dialog.showModal();
-    if (!open && dialog.open) dialog.close();
-  }, [open]);
   return (
-    <dialog ref={ref} className="dialog" aria-labelledby="confirm-title" onCancel={props.onCancel} onClose={props.onCancel}>
-      <h2 id="confirm-title">{props.title}</h2>
-      <div className="dialog-body">{props.body}</div>
-      <div className="row row-end">
-        <button type="button" className="btn" onClick={props.onCancel}>
-          Cancel
-        </button>
-        <button type="button" className="btn btn-danger" onClick={props.onConfirm} disabled={props.busy}>
-          {props.confirmLabel}
-        </button>
-      </div>
-    </dialog>
+    <Dialog
+      open={props.open}
+      title={props.title}
+      onClose={props.onCancel}
+      {...(props.busy !== undefined ? { busy: props.busy } : {})}
+      footer={
+        <>
+          <Button variant="secondary" onClick={props.onCancel}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={props.onConfirm} disabled={props.busy}>
+            {props.confirmLabel}
+          </Button>
+        </>
+      }
+    >
+      {props.body}
+    </Dialog>
   );
 }

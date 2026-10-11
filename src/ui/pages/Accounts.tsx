@@ -1,3 +1,4 @@
+import { Button } from "@opt2-tealbrick/ui";
 import { type FormEvent, useId, useMemo, useState } from "react";
 
 import { ConfirmDialog, KindBadge, Notice, StatusLabel } from "../components.tsx";
@@ -122,9 +123,9 @@ function RefreshTools({ service }: { service: string }) {
   return (
     <div className="row">
       {state.text ? <span className={state.error ? "inline-error" : "muted"}>{state.text}</span> : null}
-      <button type="button" className="btn" onClick={() => void run()} disabled={state.busy} aria-label={`Refresh tools of ${service}`}>
+      <Button type="button" variant="secondary" onClick={() => void run()} disabled={state.busy} aria-label={`Refresh tools of ${service}`}>
         Refresh tools
-      </button>
+      </Button>
     </div>
   );
 }
@@ -162,12 +163,12 @@ function AccountRow(props: { account: Account; ownerName: string; agents: AgentI
               Account label
             </label>
             <input id={labelId} value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} required />
-            <button type="submit" className="btn btn-primary" disabled={busy}>
+            <Button type="submit" variant="primary" disabled={busy}>
               Save
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className="btn"
+              variant="secondary"
               disabled={busy}
               onClick={() => {
                 setEditing(false);
@@ -176,7 +177,7 @@ function AccountRow(props: { account: Account; ownerName: string; agents: AgentI
               }}
             >
               Cancel
-            </button>
+            </Button>
           </form>
         ) : (
           <>
@@ -193,12 +194,12 @@ function AccountRow(props: { account: Account; ownerName: string; agents: AgentI
       {account.status === "failed" && account.detail ? <p className="muted">{account.detail}</p> : null}
       {!editing ? (
         <div className="row">
-          <button type="button" className="btn" onClick={() => setEditing(true)} aria-label={`Rename ${account.label}`}>
+          <Button type="button" variant="secondary" onClick={() => setEditing(true)} aria-label={`Rename ${account.label}`}>
             Rename
-          </button>
-          <button type="button" className="btn btn-danger-outline" onClick={props.onDisconnect} aria-label={`Disconnect ${account.label}`}>
+          </Button>
+          <Button type="button" variant="danger" onClick={props.onDisconnect} aria-label={`Disconnect ${account.label}`}>
             Disconnect
-          </button>
+          </Button>
         </div>
       ) : null}
       {account.status === "connected" ? <AgentAccess account={account} agents={props.agents} /> : null}

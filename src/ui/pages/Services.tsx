@@ -1,3 +1,4 @@
+import { Button } from "@opt2-tealbrick/ui";
 import { type FormEvent, useEffect, useId, useState } from "react";
 
 import { Notice } from "../components.tsx";
@@ -144,9 +145,9 @@ function WatchPanel(props: { watch: Watch; onOpenAccounts(): void; onClose(): vo
       {watch.phase === "failed" ? <Notice tone="error">"{watch.label}" did not connect.{watch.detail ? ` ${watch.detail}` : ""}</Notice> : null}
       {watch.phase === "timeout" ? <Notice tone="error">No answer after 5 minutes for "{watch.label}". Check Accounts to see if it connected, or try again.</Notice> : null}
       {watch.phase !== "waiting" ? (
-        <button type="button" className="btn" onClick={props.onClose}>
+        <Button type="button" variant="secondary" onClick={props.onClose}>
           Dismiss
-        </button>
+        </Button>
       ) : null}
     </section>
   );
@@ -176,9 +177,9 @@ function ConnectState({ service, open, onOpen }: { service: ServiceHit; open: bo
       return <span className="muted note">Cannot be connected yet.</span>;
     default:
       return (
-        <button type="button" className="btn btn-primary" onClick={onOpen} disabled={open} aria-label={`Connect ${service.name}`}>
+        <Button type="button" variant="primary" onClick={onOpen} disabled={open} aria-label={`Connect ${service.name}`}>
           Connect
-        </button>
+        </Button>
       );
   }
 }
@@ -222,12 +223,12 @@ function useKindFields() {
 function FormButtons(props: { busy: boolean; submitLabel: string; onCancel(): void }) {
   return (
     <div className="row">
-      <button type="submit" className="btn btn-primary" disabled={props.busy}>
+      <Button type="submit" variant="primary" disabled={props.busy}>
         {props.busy ? "Working" : props.submitLabel}
-      </button>
-      <button type="button" className="btn" onClick={props.onCancel} disabled={props.busy}>
+      </Button>
+      <Button type="button" variant="secondary" onClick={props.onCancel} disabled={props.busy}>
         Cancel
-      </button>
+      </Button>
     </div>
   );
 }
