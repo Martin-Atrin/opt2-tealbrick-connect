@@ -1,0 +1,90 @@
+/** Custom MCP servers: Streamable HTTP client (JSON + SSE replies), header rules, tools with annotation classes, tiers. */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+
+import type { Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { Handler } from "@opt2-tealbrick/spec/sdk";
+
+import { type ConnectError, createConnectApp } from "../src/app.ts";
+import { McpClient, SseParser } from "../src/sources/mcp/client.ts";
+import { validateHeaders } from "../src/sources/mcp/source.ts";
+import { root, testCtx, testDb } from "./helpers.ts";
+
+const URL_ = "https://mcp.example.com/mcp";
+
+function fakeServer(opts: { sse?: boolean } = {}) {
+  const seen: { method: string; headers: Headers; body: Record<string, unknown> | null }[] = [];
+  const impl = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+    seen.push({ method: init?.method ?? "GET", headers, body });
+    if (headers.get("authorization") !== "Bearer good") return new Response("no", { status: 401 });
+    if (!body || body.id === undefined) return new Response(null, { status: 202 });
+    let result: unknown;
+    if (body.method === "initialize") result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "x" } };
+    else if (body.method === "tools/list") {
+      const cursor = (body.params as { cursor?: string }).cursor;
+      result = cursor
+        ? { tools: [{ name: "delete_note", annotations: { destructiveHint: true } }] }
+        : { tools: [{ name: "search_notes", annotations: { readOnlyHint: true }, inputSchema: { type: "object", properties: { q: { type: "string" } } } }, { name: "send_digest", annotations: { readOnlyHint: false, openWorldHint: true } }], nextCursor: "p2" };
+    } else if (body.method === "tools/call") result = { content: [{ type: "text", text: `ran ${(body.params as { name: string }).name}` }], isError: false };
+    const message = JSON.stringify({ jsonrpc: "2.0", id: body.id, result });
+    const responseHeaders: Record<string, string> = { "mcp-session-id": "sess-1", "content-type": opts.sse ? "text/event-stream" : "application/json" };
+    return new Response(opts.sse ? `event: message\ndata: ${message}\n\n` : message, { headers: responseHeaders });
+  }) as typeof fetch;
+  return { impl, seen };
+}
+
+test("SSE parser joins data lines and handles split CRLF", () => {
+  const events: string[] = [];
+  const p = new SseParser((e) => events.push(e.data), 1000);
+  p.feed("data: a\r");
+  p.feed("\ndata: b\r\n\r\n: comment\n");
+  assert.deepEqual(events, ["a\nb"]);
+});
+
+for (const sse of [false, true]) {
+  test(`client: initialize, session header, paging, call (${sse ? "SSE" : "JSON"} replies)`, async () => {
+    const server = fakeServer({ sse });
+    const client = await McpClient.connect({ url: URL_, headers: { authorization: "Bearer good" }, fetchImpl: server.impl });
+    const tools = await client.listTools();
+    assert.deepEqual(tools.map((t) => t.name), ["search_notes", "send_digest", "delete_note"]);
+    assert.deepEqual(await client.callTool("search_notes", { q: "x" }), { content: [{ type: "text", text: "ran search_notes" }], isError: false });
+    await client.close();
+    const afterInit = server.seen.slice(1);
+    assert.ok(afterInit.every((r) => r.headers.get("mcp-session-id") === "sess-1" && r.headers.get("mcp-protocol-version") === "2025-06-18"));
+    assert.equal(server.seen.at(-1)?.method, "DELETE");
+  });
+}
+
+test("header rules refuse transport headers and line breaks", () => {
+  assert.deepEqual(validateHeaders({ Authorization: "Bearer x" }), { authorization: "Bearer x" });
+  assert.throws(() => validateHeaders({ host: "x" }), /not allowed/u);
+  assert.throws(() => validateHeaders({ "mcp-session-id": "x" }), /not allowed/u);
+  assert.throws(() => validateHeaders({ "x-key": "a\r\nb" }), /invalid value/u);
+});
+
+test("app: connect an MCP server, classes from annotations, tiers enforced, headers sealed", async () => {
+  const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
+  const server = fakeServer();
+  const db = testDb();
+  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), kek: Buffer.alloc(32, 9), publicOrigin: () => null, scopes: () => null, fetchImpl: server.impl, catalogAllowOrigins: ["https://mcp.example.com"] });
+  const person = testCtx({ db, person: true });
+  await assert.rejects((app.handlers.mcp_account_connect as Handler)({ label: "Notes", url: URL_, headers: { Authorization: "Bearer bad" } }, person), (e: ConnectError) => e.code === "mcp_unauthorized");
+  await assert.rejects((app.handlers.mcp_account_connect as Handler)({ label: "Notes", url: "https://mcp.example.com/mcp?key=1", headers: {} }, person), (e: ConnectError) => e.code === "mcp_url_invalid");
+  const out = (await (app.handlers.mcp_account_connect as Handler)({ label: "Notes", url: URL_, headers: { Authorization: "Bearer good" } }, person)) as { account: { id: string; service: string } };
+  assert.ok(!JSON.stringify(db.prepare("SELECT * FROM connect_secrets").all()).includes("Bearer good"));
+  const classes = Object.fromEntries(db.prepare("SELECT upstream, effect FROM connect_tools").all().map((r) => [r.upstream, r.effect]));
+  assert.deepEqual(classes, { search_notes: "read", send_digest: "outward", delete_note: "destructive" });
+  const names = Object.fromEntries(db.prepare("SELECT upstream, name FROM connect_tools").all().map((r) => [r.upstream, String(r.name)]));
+  const dyn = app.dynamic?.tools;
+  assert.ok(dyn);
+  const reader = testCtx({ db, access: { [out.account.id]: "read" } });
+  assert.deepEqual(await dyn.call(names.search_notes ?? "", { q: "x" }, reader), { account: "Notes", untrusted: true, data: { content: [{ type: "text", text: "ran search_notes" }] } });
+  await assert.rejects(dyn.call(names.send_digest ?? "", {}, reader), (e: ConnectError) => e.code === "scope_denied");
+  const disc = (await (app.handlers.account_disconnect as Handler)({ id: out.account.id }, person)) as { account: { status: string } };
+  assert.equal(disc.account.status, "revoked");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM connect_tools").get()?.n, 0);
+});

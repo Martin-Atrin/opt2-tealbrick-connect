@@ -11,6 +11,8 @@ import { BuzzIdentities } from "./channels/buzz/identity.ts";
 import { BuzzRelay } from "./channels/buzz/relay.ts";
 import { SecretBox, SecretStore } from "./secrets.ts";
 import { CatalogCallError } from "./sources/catalog/http.ts";
+import { McpError } from "./sources/mcp/client.ts";
+import { McpSource } from "./sources/mcp/source.ts";
 import { CatalogError, CatalogSource } from "./sources/catalog/source.ts";
 import { ComposioClient, ComposioError, type ComposioToolkit } from "./sources/composio/client.ts";
 import { loadPolicies } from "./sources/composio/policy.ts";
@@ -73,6 +75,7 @@ interface Services {
   buzz: BuzzIdentities;
   relay: BuzzRelay;
   catalog: CatalogSource;
+  mcp: McpSource;
 }
 
 export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.account.connect" | "connect.account.disconnect" | "connect.buzz.generate" | "connect.buzz.rotate"> {
@@ -125,7 +128,14 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       ...(env.fetchImpl ? { fetchImpl: env.fetchImpl } : {}),
       ...(env.catalogAllowOrigins ? { allowOrigins: env.catalogAllowOrigins } : {}),
     });
-    const built = { accounts, tools, secrets, composio, buzz, relay, catalog };
+    const mcp = new McpSource({
+      accounts,
+      tools,
+      secrets,
+      ...(env.fetchImpl ? { fetchImpl: env.fetchImpl } : {}),
+      ...(env.catalogAllowOrigins ? { allowOrigins: env.catalogAllowOrigins } : {}),
+    });
+    const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp };
     cache = { db, services: built };
     return built;
   };
@@ -137,6 +147,7 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       if (error instanceof ComposioError) fail(error.code, error.message, error.status);
       if (error instanceof NetPolicyError) fail(error.code, error.message, 422);
       if (error instanceof CatalogError) fail(error.code, error.message, error.code === "catalog_app_unknown" || error.code === "tool_unknown" ? 404 : 400);
+      if (error instanceof McpError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
       if (error instanceof CatalogCallError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
       if (error instanceof Error && /^[a-z_]+(?::|$)/u.test(error.message)) fail(error.message.split(":")[0] ?? "connect_error", error.message, 400);
       throw error;
@@ -226,6 +237,7 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         let data: unknown;
         if (row.source === "composio") data = await s.composio.execute(account, row.upstream, upstreamArgs, workspace(ctx));
         else if (row.source === "catalog") data = await s.catalog.execute(account, row.name, upstreamArgs);
+        else if (row.source === "mcp") data = await s.mcp.execute(account, row.upstream, upstreamArgs);
         else fail("source_not_ready", `${row.source} tools are not available yet.`, 501);
         return { account: account.label, untrusted: true, data: (data ?? null) as Json };
       });
@@ -357,6 +369,25 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         return { account: accountView(account) };
       });
     },
+    async mcp_account_connect(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx.db, ctx.getKey);
+        const i = asInput(input);
+        const kind = (str(i.kind) ?? "as_me") as ConnectionKind;
+        if (!CONNECTION_KINDS.includes(kind)) fail("kind_invalid", "Kind must be as_me or as_itself.");
+        const agent = str(i.agent) ?? null;
+        if (kind === "as_itself" && !agentsOf(ctx.db).some((a) => a.id === agent)) fail("agent_unknown", "Pick the agent this account belongs to.");
+        const account = await s.mcp.connect({
+          label: str(i.label) ?? "MCP server",
+          url: str(i.url) ?? fail("url_required", "Enter the MCP server address."),
+          headers: (i.headers && typeof i.headers === "object" ? i.headers : {}) as Record<string, unknown>,
+          kind,
+          ownerAgent: kind === "as_itself" ? agent : null,
+        });
+        await env.scopes()?.instances.create(PRODUCT_SCOPE, account.id, account.label, account.ownerAgent ? { ownerAgent: account.ownerAgent as `agt_${string}` } : {});
+        return { account: accountView(account) };
+      });
+    },
     async account_update(input, ctx) {
       return guard(async () => {
         const s = services(ctx.db, ctx.getKey);
@@ -376,7 +407,9 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
             ? await s.composio.disconnect(account)
             : account.source === "catalog"
               ? s.catalog.disconnect(account)
-              : s.accounts.update(id, { status: "revoked" });
+              : account.source === "mcp"
+                ? s.mcp.disconnect(account)
+                : s.accounts.update(id, { status: "revoked" });
         return { account: accountView(revoked) };
       });
     },
@@ -386,7 +419,9 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         const service = str(asInput(input).service) ?? fail("service_required", "Pick a service.");
         const connected = s.accounts.list({ service, status: "connected" });
         if (connected.length === 0) fail("service_not_connected", "Connect an account first.", 409);
-        const tools = connected[0]?.source === "catalog" ? await s.catalog.syncTools(service) : await s.composio.syncTools(service);
+        const first = connected[0];
+        const tools =
+          first?.source === "catalog" ? await s.catalog.syncTools(service) : first?.source === "mcp" ? await s.mcp.syncTools(first) : await s.composio.syncTools(service);
         return { service, tools };
       });
     },
