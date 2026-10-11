@@ -5,13 +5,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import type { Handler } from "@opt2-tealbrick/spec/sdk";
 
 import { createConnectApp } from "../src/app.ts";
 import { BuzzIdentities, normalizeRelayUrl } from "../src/channels/buzz/identity.ts";
 import { eventId, KindNotAllowedError, npubEncode, publicKeyOf, signEvent, verifyEvent } from "../src/channels/buzz/nostr.ts";
-import { SecretBox, SecretStore } from "../src/secrets.ts";
-import { fakeFetch, root, testCtx, testDb } from "./helpers.ts";
+import { fakeFetch, handlerOf, memorySecrets, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const agents = Array.from({ length: 16 }, (_, i) => ({ id: `agt_01AGENT${String(i).padStart(19, "0")}`, name: `Agent ${i + 1}` }));
@@ -37,44 +35,41 @@ test("J3: one owner action creates identities for 16 agents; a second run change
   const app = createConnectApp({
     manifest,
     migrationsDir: join(root, "migrations"),
-    kek: Buffer.alloc(32, 4),
-    workspaceId: () => "ws_X",
-    publicOrigin: () => null,
-    scopes: () => null,
   });
   for (const agent of agents) {
     await app.events?.agentAdded?.({ ...agent, id: agent.id as `agt_${string}`, mode: "free", status: "active" }, { db, scopes: null as never, log: testCtx({ db }).log });
   }
   const ctx = testCtx({ db });
-  const first = (await (app.handlers.buzz_identities_generate as Handler)({}, ctx)) as { created: { agent: string; npub: string; pubkey: string }[]; existing: unknown[] };
+  const first = (await handlerOf(app, "buzz_identities_generate")({}, ctx)) as { created: { agent: string; npub: string; pubkey: string }[]; existing: unknown[] };
   assert.equal(first.created.length, 16);
   assert.equal(first.existing.length, 0);
   assert.equal(new Set(first.created.map((i) => i.pubkey)).size, 16);
   for (const identity of first.created) assert.match(identity.npub, /^npub1[02-9ac-hj-np-z]{58}$/u);
-  const second = (await (app.handlers.buzz_identities_generate as Handler)({}, ctx)) as { created: unknown[]; existing: unknown[] };
+  const second = (await handlerOf(app, "buzz_identities_generate")({}, ctx)) as { created: unknown[]; existing: unknown[] };
   assert.equal(second.created.length, 0);
   assert.equal(second.existing.length, 16);
-  // Secrets are sealed: no 64-hex secret key appears in the secrets table; nothing secret in the identity rows.
-  const rows = db.prepare("SELECT sealed FROM connect_secrets").all();
-  assert.equal(rows.length, 16);
-  for (const r of rows) assert.doesNotMatch(String(r.sealed), /[0-9a-f]{64}/u);
+  // Secret keys live only in the SDK app secrets (sealed by the SDK), one per agent; identity rows hold public data.
+  assert.equal(secretsFor(db).names().length, 16);
+  const rowText = JSON.stringify(db.prepare("SELECT * FROM connect_buzz_identities").all());
+  for (const name of secretsFor(db).names()) assert.ok(!rowText.includes((await secretsFor(db).get(name)) ?? "-"));
   // The agent reads only its own identity.
-  const mine = (await (app.handlers.buzz_identity as Handler)({}, testCtx({ db, agent: agents[3]?.id ?? "" }))) as { npub: string };
+  const mine = (await handlerOf(app, "buzz_identity")({}, testCtx({ db, agent: agents[3]?.id ?? "" }))) as { npub: string };
   assert.equal(mine.npub, first.created.find((i) => i.agent === agents[3]?.id)?.npub);
-  const stranger = (await (app.handlers.buzz_identity as Handler)({}, testCtx({ db, agent: "agt_01NOBODY00000000000000000" }))) as { npub: null };
+  const stranger = (await handlerOf(app, "buzz_identity")({}, testCtx({ db, agent: "agt_01NOBODY00000000000000000" }))) as { npub: null };
   assert.equal(stranger.npub, null);
 });
 
-test("rotation replaces the key; removal deletes the sealed key", () => {
+test("rotation replaces the key; removal deletes the sealed key", async () => {
   const db = testDb();
-  const buzz = new BuzzIdentities({ db, secrets: new SecretStore(db, new SecretBox(Buffer.alloc(32, 8))) });
-  const [a] = buzz.generateAll([{ id: "agt_A", name: "A" }]).created;
+  const secrets = memorySecrets();
+  const buzz = new BuzzIdentities({ db, secrets });
+  const [a] = (await buzz.generateAll([{ id: "agt_A", name: "A" }])).created;
   assert.ok(a);
-  const rotated = buzz.rotate({ id: "agt_A", name: "A" });
+  const rotated = await buzz.rotate({ id: "agt_A", name: "A" });
   assert.notEqual(rotated.pubkey, a.pubkey);
-  buzz.remove("agt_A");
+  await buzz.remove("agt_A");
   assert.equal(buzz.get("agt_A"), null);
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM connect_secrets").get()?.n, 0);
+  assert.deepEqual(secrets.names(), []);
 });
 
 test("relay URL: wss host only; private relays refused", async () => {
@@ -82,7 +77,7 @@ test("relay URL: wss host only; private relays refused", async () => {
   assert.throws(() => normalizeRelayUrl("https://relay.example.com"), /relay_url_invalid/u);
   assert.throws(() => normalizeRelayUrl("wss://relay.example.com/path"), /relay_url_invalid/u);
   const db = testDb();
-  const buzz = new BuzzIdentities({ db, secrets: new SecretStore(db, new SecretBox(Buffer.alloc(32, 8))), lookup: async () => [{ address: "10.0.0.2", family: 4 }] });
+  const buzz = new BuzzIdentities({ db, secrets: memorySecrets(), lookup: async () => [{ address: "10.0.0.2", family: 4 }] });
   await assert.rejects(buzz.setRelayUrl("wss://relay.corp.example"), /address_not_allowed|not allowed/u);
 });
 
@@ -103,11 +98,11 @@ test("profile publish posts a signed kind 0 with a valid NIP-98 header to the te
   });
   const buzz = new BuzzIdentities({
     db,
-    secrets: new SecretStore(db, new SecretBox(Buffer.alloc(32, 8))),
+    secrets: memorySecrets(),
     fetchImpl: relay.impl,
     allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"],
   });
-  buzz.generateAll([{ id: "agt_A", name: "Agent A" }]);
+  await buzz.generateAll([{ id: "agt_A", name: "Agent A" }]);
   await buzz.setRelayUrl("wss://relay.test.example");
   const published = await buzz.publishProfile("agt_A");
   assert.ok(published.profilePublishedAt);

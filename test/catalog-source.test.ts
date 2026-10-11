@@ -8,13 +8,12 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import type { Handler } from "@opt2-tealbrick/spec/sdk";
 import { AccountStore } from "../src/accounts.ts";
 import { type ConnectError, createConnectApp } from "../src/app.ts";
 import { buildRequest } from "../src/sources/catalog/http.ts";
 import { compile } from "../src/sources/catalog/openapi.ts";
 import { parseBundle } from "../src/sources/catalog/source.ts";
-import { fakeFetch, root, testCtx, testDb } from "./helpers.ts";
+import { fakeFetch, handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const sha = (d: string | Uint8Array) => createHash("sha256").update(d).digest("hex");
 const spec = {
@@ -99,20 +98,18 @@ test("app: connect a catalog account with an API key, tiers apply, secrets scrub
     const app = createConnectApp({
       manifest,
       migrationsDir: join(root, "migrations"),
-      kek: Buffer.alloc(32, 6),
-      publicOrigin: () => null,
-      scopes: () => null,
       fetchImpl,
       dataDir,
       catalogAllowOrigins: ["https://mailer.example.com"],
     });
     const person = testCtx({ db, person: true });
-    const search = (await (app.handlers.services_search as Handler)({ query: "mail" }, person)) as { composioKey: boolean; services: { service: string; source: string; fields: string[] }[] };
+    const search = (await handlerOf(app, "services_search")({ query: "mail" }, person)) as { composioKey: boolean; services: { service: string; source: string; fields: string[] }[] };
     assert.deepEqual(search.services.map((x) => [x.service, x.source, x.fields]), [["mailer", "catalog", ["token"]]]);
-    await assert.rejects((app.handlers.catalog_account_connect as Handler)({ service: "mailer", label: "M", baseUrl: "https://10.0.0.1", credentials: { token: "x" } }, person), (e: ConnectError) => e.code === "endpoint_not_allowed");
-    const out = (await (app.handlers.catalog_account_connect as Handler)({ service: "mailer", label: "Newsletter", baseUrl: "https://mailer.example.com", credentials: { token: "SECRET-TOKEN-1" } }, person)) as { account: { id: string; status: string } };
+    await assert.rejects(handlerOf(app, "catalog_account_connect")({ service: "mailer", label: "M", baseUrl: "https://10.0.0.1", credentials: { token: "x" } }, person), (e: ConnectError) => e.code === "endpoint_not_allowed");
+    const out = (await handlerOf(app, "catalog_account_connect")({ service: "mailer", label: "Newsletter", baseUrl: "https://mailer.example.com", credentials: { token: "SECRET-TOKEN-1" } }, person)) as { account: { id: string; status: string } };
     assert.equal(out.account.status, "connected");
-    assert.ok(!JSON.stringify(db.prepare("SELECT * FROM connect_secrets").all()).includes("SECRET-TOKEN-1"));
+    assert.deepEqual(secretsFor(db).names(), [`account:${out.account.id}`]);
+    assert.ok(!JSON.stringify(db.prepare("SELECT * FROM connect_accounts").all()).includes("SECRET-TOKEN-1"));
     const tools = db.prepare("SELECT name, effect FROM connect_tools ORDER BY name").all().map((r) => ({ ...r }));
     assert.deepEqual(tools.map((t) => t.name), ["cb_mailer_createsubscriber", "cb_mailer_deletesubscriberbyid", "cb_mailer_getsubscribers", "cb_mailer_previewcampaign", "cb_mailer_updatesubscriberbyid"]);
     const dyn = app.dynamic?.tools;
@@ -124,9 +121,9 @@ test("app: connect a catalog account with an API key, tiers apply, secrets scrub
     await assert.rejects(dyn.call("cb_mailer_createsubscriber", { body: { email: "b@example.com" } }, reader), (e: ConnectError) => e.code === "scope_denied");
     const writer = testCtx({ db, access: { [out.account.id]: "read_update" } });
     assert.deepEqual(((await dyn.call("cb_mailer_createsubscriber", { body: { email: "b@example.com" } }, writer)) as { data: unknown }).data, { id: 1 });
-    const disc = (await (app.handlers.account_disconnect as Handler)({ id: out.account.id }, person)) as { account: { status: string } };
+    const disc = (await handlerOf(app, "account_disconnect")({ id: out.account.id }, person)) as { account: { status: string } };
     assert.equal(disc.account.status, "revoked");
-    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM connect_secrets").get()?.n, 0);
+    assert.deepEqual(secretsFor(db).names(), []);
     assert.equal(new AccountStore(db).get(out.account.id)?.status, "revoked");
   } finally {
     rmSync(dataDir, { recursive: true, force: true });

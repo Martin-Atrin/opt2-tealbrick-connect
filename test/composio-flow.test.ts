@@ -9,11 +9,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import type { Handler, Json } from "@opt2-tealbrick/spec/sdk";
+import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { AccountStore } from "../src/accounts.ts";
 import { type ConnectError, createConnectApp } from "../src/app.ts";
 import { allowedComposioOrigin, ComposioClient } from "../src/sources/composio/client.ts";
-import { fakeFetch, root, testCtx, testDb } from "./helpers.ts";
+import { fakeFetch, handlerOf, publicCtx, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const WS = "ws_01TESTWORKSPACE00000000000";
@@ -59,13 +59,9 @@ function setup() {
   const app = createConnectApp({
     manifest,
     migrationsDir: join(root, "migrations"),
-    kek: Buffer.alloc(32, 5),
-    workspaceId: () => WS,
-    publicOrigin: () => "https://bridge.example.com",
-    scopes: () => null,
     fetchImpl: upstream.impl,
   });
-  const h = (name: string) => app.handlers[name] as Handler;
+  const h = (name: string) => handlerOf(app, name);
   for (const agent of [{ id: ME, name: "Me" }, { id: OTHER, name: "Other" }]) {
     void app.events?.agentAdded?.({ ...agent, id: agent.id as `agt_${string}`, mode: "free", status: "active" }, { db, scopes: null as never, log: testCtx({ db }).log });
   }
@@ -73,13 +69,13 @@ function setup() {
 }
 
 async function connectInbox(s: ReturnType<typeof setup>, label: string) {
-  const ctx = testCtx({ db: s.db, person: true, keys: { COMPOSIO_API_KEY: KEY } });
+  const ctx = testCtx({ db: s.db, person: true, ws: WS, keys: { COMPOSIO_API_KEY: KEY } });
   const started = (await s.h("account_connect")({ service: "gmail", label }, ctx)) as { account: { id: string }; redirectUrl: string };
   const link = s.upstream.calls.filter((c) => c.url.pathname.endsWith("/connected_accounts/link")).at(-1);
   assert.ok(link);
   const callbackUrl = new URL((link.body as { callback_url: string }).callback_url);
   assert.equal(callbackUrl.origin + callbackUrl.pathname, "https://bridge.example.com/p/connect/oauth/composio/callback");
-  const response = await s.app.publicRoutes?.["/oauth/composio/callback"]?.(new Request(callbackUrl), { db: s.db, log: ctx.log, getKey: ctx.getKey });
+  const response = await s.app.publicRoutes?.["/oauth/composio/callback"]?.(new Request(callbackUrl), publicCtx(s.db, { workspace: WS, keys: { COMPOSIO_API_KEY: KEY } }));
   return { started, response, callbackUrl };
 }
 
@@ -112,18 +108,18 @@ test("J1: connect two Gmail inboxes, verified callback, user_id = workspace id, 
     { name: "gmail_send_email", effect: "outward" },
   ]);
   // The state is single use.
-  const replay = await s.app.publicRoutes?.["/oauth/composio/callback"]?.(new Request(one.callbackUrl), { db: s.db, log: testCtx({ db: s.db }).log, getKey: async () => KEY });
+  const replay = await s.app.publicRoutes?.["/oauth/composio/callback"]?.(new Request(one.callbackUrl), publicCtx(s.db, { workspace: WS, keys: { COMPOSIO_API_KEY: KEY } }));
   assert.equal(replay?.status, 400);
 });
 
 test("callback refuses an account Composio does not report ACTIVE", async () => {
   const s = setup();
-  const ctx = testCtx({ db: s.db, person: true, keys: { COMPOSIO_API_KEY: KEY } });
+  const ctx = testCtx({ db: s.db, person: true, ws: WS, keys: { COMPOSIO_API_KEY: KEY } });
   await connectInbox(s, "A");
   await connectInbox(s, "B");
   const started = (await s.h("account_connect")({ service: "gmail", label: "C" }, ctx)) as { account: { id: string } };
   const link = s.upstream.calls.filter((c) => c.url.pathname.endsWith("/connected_accounts/link")).at(-1);
-  const res = await s.app.publicRoutes?.["/oauth/composio/callback"]?.(new Request(((link?.body ?? {}) as { callback_url: string }).callback_url), { db: s.db, log: ctx.log, getKey: ctx.getKey });
+  const res = await s.app.publicRoutes?.["/oauth/composio/callback"]?.(new Request(((link?.body ?? {}) as { callback_url: string }).callback_url), publicCtx(s.db, { workspace: WS, keys: { COMPOSIO_API_KEY: KEY } }));
   assert.equal(res?.status, 400);
   assert.equal(new AccountStore(s.db).get(started.account.id)?.status, "failed");
 });
@@ -176,7 +172,7 @@ test("catalog search offers only connected services; resolve returns the class",
   const s = setup();
   const dyn = s.app.dynamic?.tools;
   assert.ok(dyn);
-  const hookCtx = { db: s.db, log: testCtx({ db: s.db }).log, getKey: async () => KEY, signal: new AbortController().signal };
+  const hookCtx = { db: s.db, log: testCtx({ db: s.db }).log, getKey: async () => KEY, signal: new AbortController().signal, secrets: secretsFor(s.db) };
   assert.deepEqual(await dyn.catalog({ query: "gmail" }, hookCtx), []);
   await connectInbox(s, "Work inbox");
   const hits = await dyn.catalog({ query: "send email" }, hookCtx);
@@ -200,7 +196,7 @@ test("disconnect revokes the account and removes tools when none is left", async
   await connectInbox(s, "Work inbox");
   const work = new AccountStore(s.db).list()[0];
   assert.ok(work);
-  const ctx = testCtx({ db: s.db, person: true, keys: { COMPOSIO_API_KEY: KEY } });
+  const ctx = testCtx({ db: s.db, person: true, ws: WS, keys: { COMPOSIO_API_KEY: KEY } });
   // Composio answers 404 for the delete in this fake: treated as already gone.
   const out = (await s.h("account_disconnect")({ id: work.id }, ctx)) as { account: { status: string } };
   assert.equal(out.account.status, "revoked");
@@ -211,21 +207,12 @@ test("BASE constant matches the production Composio API", () => {
   assert.equal(BASE, "https://backend.composio.dev/api/v3.1");
 });
 
-test("without an SDK workspace id, Connect uses the id recorded from a verified agent grant", async () => {
+test("without a workspace id from the SDK, connecting refuses instead of guessing", async () => {
   const db = testDb();
   const upstream = composioFake();
-  const app = createConnectApp({
-    manifest,
-    migrationsDir: join(root, "migrations"),
-    kek: Buffer.alloc(32, 5),
-    publicOrigin: () => "https://bridge.example.com",
-    scopes: () => null,
-    fetchImpl: upstream.impl,
-  });
-  const person = testCtx({ db, person: true, keys: { COMPOSIO_API_KEY: KEY } });
-  await assert.rejects((app.handlers.account_connect as Handler)({ service: "gmail", label: "Inbox" }, person), (e: ConnectError) => e.code === "workspace_unknown");
-  await (app.handlers.accounts_list as Handler)({}, testCtx({ db, ws: WS }));
-  await (app.handlers.account_connect as Handler)({ service: "gmail", label: "Inbox" }, person);
-  const link = upstream.calls.find((c) => c.url.pathname.endsWith("/connected_accounts/link"));
-  assert.equal(((link?.body ?? {}) as { user_id?: string }).user_id, WS);
+  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), fetchImpl: upstream.impl });
+  const person = testCtx({ db, person: true, workspace: null, keys: { COMPOSIO_API_KEY: KEY } });
+  await assert.rejects(handlerOf(app, "account_connect")({ service: "gmail", label: "Inbox" }, person), (e: ConnectError) => e.code === "workspace_unknown");
+  const noDoor = testCtx({ db, person: true, ws: WS, publicUrl: null, keys: { COMPOSIO_API_KEY: KEY } });
+  await assert.rejects(handlerOf(app, "account_connect")({ service: "gmail", label: "Inbox" }, noDoor), (e: ConnectError) => e.code === "public_origin_unknown");
 });

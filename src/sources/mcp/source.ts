@@ -4,9 +4,10 @@
  * Each server is its own service (`mcp_<host>_<hash>`), its tools classified by MCP annotations, then name.
  * No stdio servers (Connect never starts local processes). MCP OAuth follows once the bridge public URL reaches apps.
  */
+import type { AppSecrets } from "@opt2-tealbrick/miniapp-sdk";
+
 import type { Account, AccountStore } from "../../accounts.ts";
 import { classifyMcpTool } from "../../effect.ts";
-import type { SecretStore } from "../../secrets.ts";
 import { entrySchema, type ToolRegistry, toolName } from "../../tools.ts";
 import type { FetchLike } from "../../util/http.ts";
 import { sha256Hex } from "../../util/ids.ts";
@@ -41,7 +42,7 @@ export function mcpService(url: URL): string {
 export interface McpDeps {
   accounts: AccountStore;
   tools: ToolRegistry;
-  secrets: SecretStore;
+  secrets: AppSecrets;
   fetchImpl?: FetchLike;
   lookup?: Lookup;
   allowOrigins?: readonly string[];
@@ -64,8 +65,8 @@ export class McpSource {
     return url;
   }
 
-  #headers(account: Account): Record<string, string> {
-    const raw = this.#d.secrets.get(`account:${account.id}:headers`);
+  async #headers(account: Account): Promise<Record<string, string>> {
+    const raw = await this.#d.secrets.get(`account:${account.id}`);
     return raw ? (JSON.parse(raw) as Record<string, string>) : {};
   }
 
@@ -95,7 +96,7 @@ export class McpSource {
       externalRef: url.toString(),
       status: "connected",
     });
-    this.#d.secrets.put(`account:${account.id}:headers`, JSON.stringify(headers));
+    await this.#d.secrets.put(`account:${account.id}`, JSON.stringify(headers));
     this.#register(service, tools);
     return account;
   }
@@ -117,7 +118,7 @@ export class McpSource {
 
   async syncTools(account: Account): Promise<number> {
     if (!account.externalRef) throw new McpError("account_not_connected", "This account is not connected.");
-    const client = await this.#client(account.externalRef, this.#headers(account));
+    const client = await this.#client(account.externalRef, await this.#headers(account));
     try {
       return this.#register(account.service, await client.listTools());
     } finally {
@@ -127,7 +128,7 @@ export class McpSource {
 
   async execute(account: Account, upstreamTool: string, args: Record<string, unknown>): Promise<unknown> {
     if (account.source !== "mcp" || account.status !== "connected" || !account.externalRef) throw new McpError("account_not_connected", "This account is not connected.");
-    const client = await this.#client(account.externalRef, this.#headers(account));
+    const client = await this.#client(account.externalRef, await this.#headers(account));
     try {
       const result = await client.callTool(upstreamTool, args);
       if (result.isError) throw new McpError("mcp_tool_error", JSON.stringify(result.content).slice(0, 500));
@@ -137,8 +138,8 @@ export class McpSource {
     }
   }
 
-  disconnect(account: Account): Account {
-    this.#d.secrets.deletePrefix(`account:${account.id}:`);
+  async disconnect(account: Account): Promise<Account> {
+    await this.#d.secrets.delete(`account:${account.id}`);
     const revoked = this.#d.accounts.update(account.id, { status: "revoked", detail: "Disconnected by the owner." });
     if (this.#d.accounts.list({ service: account.service, status: "connected" }).length === 0) this.#d.tools.removeService("mcp", account.service);
     return revoked;

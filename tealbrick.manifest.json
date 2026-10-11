@@ -753,7 +753,7 @@
     {
       "id": "buzz_relay_set",
       "title": "Set the Buzz relay",
-      "description": "Set the address of your Buzz relay (wss://).",
+      "description": "Set the address of your Buzz relay (a wss address).",
       "input": {
         "type": "object",
         "additionalProperties": false,

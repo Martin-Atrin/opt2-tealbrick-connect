@@ -6,14 +6,13 @@ import { BuzzIdentities } from "../src/channels/buzz/identity.ts";
 
 import { eventId, generateSecretKey, type NostrEvent, publicKeyOf, signEvent, verifyEvent } from "../src/channels/buzz/nostr.ts";
 import { BuzzRelay, cleanText } from "../src/channels/buzz/relay.ts";
-import { SecretBox, SecretStore } from "../src/secrets.ts";
-import { fakeFetch, testDb } from "./helpers.ts";
+import { fakeFetch, memorySecrets, testDb } from "./helpers.ts";
 
 const CHANNEL = "0b7d6c2e-1f3a-4c5b-9d8e-7f6a5b4c3d2e";
 const OTHER_CHANNEL = "1c8e7d3f-2a4b-4d6c-8e9f-0a1b2c3d4e5f";
 const human = generateSecretKey();
 
-function setup() {
+async function setup() {
   const db = testDb();
   const posted: NostrEvent[] = [];
   let agentPubkey = "";
@@ -43,11 +42,11 @@ function setup() {
   });
   const identities = new BuzzIdentities({
     db,
-    secrets: new SecretStore(db, new SecretBox(Buffer.alloc(32, 2))),
+    secrets: memorySecrets(),
     fetchImpl: relay.impl,
     allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"],
   });
-  const created = identities.generateAll([{ id: "agt_A", name: "A" }]).created[0];
+  const created = (await identities.generateAll([{ id: "agt_A", name: "A" }])).created[0];
   assert.ok(created);
   agentPubkey = created.pubkey;
   return { identities, relay: new BuzzRelay(identities, relay.impl), posted, agentPubkey };
@@ -69,13 +68,13 @@ function metaEvent(id: string, name: string, flags: string[][]) {
 }
 
 test("channels: only channels whose member list names the agent", async () => {
-  const s = setup();
+  const s = await setup();
   await s.identities.setRelayUrl("wss://relay.test.example");
   assert.deepEqual(await s.relay.channels("agt_A"), [{ id: CHANNEL, name: "general", type: "channel" }]);
 });
 
 test("read: forged and off-channel events dropped, bidi stripped", async () => {
-  const s = setup();
+  const s = await setup();
   await s.identities.setRelayUrl("wss://relay.test.example");
   const messages = await s.relay.read("agt_A", { channel: CHANNEL, since: 50 });
   assert.equal(messages.length, 1);
@@ -85,7 +84,7 @@ test("read: forged and off-channel events dropped, bidi stripped", async () => {
 });
 
 test("post: kind 9 signed by the agent with h tag and NIP-10 reply tags", async () => {
-  const s = setup();
+  const s = await setup();
   await s.identities.setRelayUrl("wss://relay.test.example");
   const root = "a".repeat(64);
   const reply = "b".repeat(64);

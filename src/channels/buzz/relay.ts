@@ -58,7 +58,7 @@ export class BuzzRelay {
       method: "POST",
       url,
       body: payload,
-      headers: { authorization: this.#identities.authHeader(agent, { url, method: "POST", body }) },
+      headers: { authorization: await this.#identities.authHeader(agent, { url, method: "POST", body }) },
       timeoutMs: 15_000,
       retries: path === "/query" ? 2 : 0,
       ...(this.#fetch ? { fetchImpl: this.#fetch } : {}),
@@ -121,7 +121,7 @@ export class BuzzRelay {
       tags.push(["e", input.replyTo.root ?? input.replyTo.id, "", "root"]);
       if (input.replyTo.root && input.replyTo.root !== input.replyTo.id) tags.push(["e", input.replyTo.id, "", "reply"]);
     }
-    const event = this.#identities.sign(agent, { kind: KIND_CHAT, tags, content });
+    const event = await this.#identities.sign(agent, { kind: KIND_CHAT, tags, content });
     const answer = await this.#post<{ accepted?: boolean; message?: string }>(agent, "/events", event);
     if (answer?.accepted === false) throw new Error(`buzz_rejected: ${cleanText(String(answer.message ?? ""), 200)}`);
     return { id: event.id };

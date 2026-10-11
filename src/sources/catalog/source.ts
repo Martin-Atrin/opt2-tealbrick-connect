@@ -8,10 +8,10 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 
+import type { AppSecrets } from "@opt2-tealbrick/miniapp-sdk";
 import type { Artifact } from "@opt2-tealbrick/spec/manifest";
 
 import type { Account, AccountStore } from "../../accounts.ts";
-import type { SecretStore } from "../../secrets.ts";
 import { entrySchema, type ToolRegistry, toolName } from "../../tools.ts";
 import type { FetchLike } from "../../util/http.ts";
 import { assertEndpointAllowed, type Lookup } from "../../util/net-policy.ts";
@@ -84,7 +84,7 @@ export interface CatalogDeps {
   dataDir: string;
   accounts: AccountStore;
   tools: ToolRegistry;
-  secrets: SecretStore;
+  secrets: AppSecrets;
   fetchImpl?: FetchLike;
   lookup?: Lookup;
   allowOrigins?: readonly string[];
@@ -162,7 +162,7 @@ export class CatalogSource {
       externalRef: base.toString().replace(/\/+$/u, ""),
       status: "connected",
     });
-    for (const field of fields) this.#d.secrets.put(`account:${account.id}:${field}`, String(input.credentials[field]).trim());
+    await this.#d.secrets.put(`account:${account.id}`, JSON.stringify(Object.fromEntries(fields.map((f) => [f, String(input.credentials[f]).trim()]))));
     if (this.#d.tools.countFor(app.id) === 0) await this.syncTools(app.id);
     return account;
   }
@@ -195,7 +195,8 @@ export class CatalogSource {
     const op = compiled.byName.get(tool) ?? (() => {
       throw new CatalogError("tool_unknown", `Unknown tool ${tool}.`);
     })();
-    const credentials = Object.fromEntries(credentialFields(app.auth).map((f) => [f, this.#d.secrets.get(`account:${account.id}:${f}`) ?? ""]));
+    const stored = await this.#d.secrets.get(`account:${account.id}`);
+    const credentials = (stored ? JSON.parse(stored) : {}) as Record<string, string>;
     const result = await callOperation({
       baseUrl: account.externalRef,
       basePath: compiled.basePath,
@@ -210,8 +211,8 @@ export class CatalogSource {
     return result.data;
   }
 
-  disconnect(account: Account): Account {
-    this.#d.secrets.deletePrefix(`account:${account.id}:`);
+  async disconnect(account: Account): Promise<Account> {
+    await this.#d.secrets.delete(`account:${account.id}`);
     const revoked = this.#d.accounts.update(account.id, { status: "revoked", detail: "Disconnected by the owner." });
     if (this.#d.accounts.list({ service: account.service, status: "connected" }).length === 0) this.#d.tools.removeService("catalog", account.service);
     return revoked;

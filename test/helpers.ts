@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-
+import type { AppSecrets, SdkOpContext, SdkPublicContext } from "@opt2-tealbrick/miniapp-sdk";
 import type { CrudAction } from "@opt2-tealbrick/spec/manifest";
-import type { Db, Json, OpContext } from "@opt2-tealbrick/spec/sdk";
+import type { Db, Json } from "@opt2-tealbrick/spec/sdk";
 
 import { ACCESS_CRUD, type AccessLevel } from "../src/effect.ts";
 
@@ -38,6 +38,49 @@ export function testDb(): Db {
   };
 }
 
+/** In-memory stand-in for the SDK `ctx.secrets` (the SDK seals under TB_KEK; tests only need the contract). */
+export function memorySecrets(): AppSecrets & { names(): string[] } {
+  const map = new Map<string, string>();
+  return {
+    put: async (name, value) => void map.set(name, value),
+    get: async (name) => map.get(name) ?? null,
+    delete: async (name) => void map.delete(name),
+    names: () => [...map.keys()].sort(),
+  };
+}
+const secretsByDb = new WeakMap<Db, ReturnType<typeof memorySecrets>>();
+export function secretsFor(db: Db) {
+  let secrets = secretsByDb.get(db);
+  if (!secrets) {
+    secrets = memorySecrets();
+    secretsByDb.set(db, secrets);
+  }
+  return secrets;
+}
+export const scopeCreates: { type: string; id: string; label: string }[] = [];
+const scopesStub = {
+  instances: {
+    create: async (type: string, id: string, label: string) => {
+      scopeCreates.push({ type, id, label });
+      return { type, id, label, shared: false };
+    },
+    list: async () => [],
+  },
+};
+
+/** Public-route context as the SDK passes it (C31 extras). */
+export function publicCtx(db: Db, input: { workspace?: string | null; keys?: Record<string, string> } = {}): SdkPublicContext {
+  return {
+    db,
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    getKey: async (name) => input.keys?.[name] ?? null,
+    publicUrl: "https://bridge.example.com",
+    workspace: (input.workspace === undefined ? "ws_TEST" : input.workspace) as never,
+    scopes: scopesStub,
+    secrets: secretsFor(db),
+  };
+}
+
 /** Minimal OpContext for handler tests: scope access from a map (agent → account → level). */
 export function testCtx(input: {
   db: Db;
@@ -47,7 +90,10 @@ export function testCtx(input: {
   ws?: string;
   /** person call from the app UI: no grant */
   person?: boolean;
-}): OpContext & { receipts: { summary: string[]; meta: Json[] } } {
+  /** SDK workspace (slice / person principal); defaults to `ws` */
+  workspace?: string | null;
+  publicUrl?: string | null;
+}): SdkOpContext & { receipts: { summary: string[]; meta: Json[] } } {
   const access = input.access ?? {};
   const receipts = { summary: [] as string[], meta: [] as Json[] };
   const agent = input.agent ?? "agt_01TESTAGENT0000000000000000";
@@ -81,6 +127,10 @@ export function testCtx(input: {
     db: input.db,
     log: { debug() {}, info() {}, warn() {}, error() {} },
     signal: new AbortController().signal,
+    publicUrl: input.publicUrl === undefined ? "https://bridge.example.com" : input.publicUrl,
+    workspace: (input.workspace === undefined ? (input.ws ?? "ws_TEST") : input.workspace) as never,
+    scopes: scopesStub,
+    secrets: secretsFor(input.db),
     receipts,
   };
 }
@@ -102,4 +152,11 @@ export function fakeFetch(routes: Record<string, Route>) {
     return new Response(JSON.stringify(out.body), { status: out.status ?? 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   return { impl, calls };
+}
+
+/** A handler as the SDK runs it: plain function or `{ run }` spec. */
+export function handlerOf(app: { handlers: Record<string, unknown> }, name: string): (input: Json, ctx: SdkOpContext) => Promise<Json> {
+  const h = app.handlers[name] as ((i: Json, c: SdkOpContext) => Promise<Json>) | { run: (i: Json, c: SdkOpContext) => Promise<Json> } | undefined;
+  if (!h) throw new Error(`no handler ${name}`);
+  return typeof h === "function" ? h : h.run;
 }

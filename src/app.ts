@@ -3,20 +3,21 @@
  * the dynamic `tools` family, public routes and events. Wire, auth, receipts, holds and scopes are SDK-owned.
  * Everything here is typed against the frozen contract (`@opt2-tealbrick/spec`).
  */
+
+import type { AppSecrets, SdkAppDefinition, SdkOpContext, SdkPublicContext } from "@opt2-tealbrick/miniapp-sdk";
 import type { CrudAction, DynamicCatalogEntry, DynamicResolution, DynamicSearchInput, Manifest } from "@opt2-tealbrick/spec/manifest";
-import type { AppDefinition, Db, DynamicHandlers, Handler, Json, OpContext, PublicHandler, ScopeStore } from "@opt2-tealbrick/spec/sdk";
+import type { Db, DynamicHandlers, Handler, HandlerSpec, Json, OpContext, PublicHandler } from "@opt2-tealbrick/spec/sdk";
 
 import { type Account, AccountStore, CONNECTION_KINDS, type ConnectionKind } from "./accounts.ts";
 import { BuzzIdentities } from "./channels/buzz/identity.ts";
 import { BuzzRelay } from "./channels/buzz/relay.ts";
-import { SecretBox, SecretStore } from "./secrets.ts";
 import { CatalogCallError } from "./sources/catalog/http.ts";
-import { McpError } from "./sources/mcp/client.ts";
-import { McpSource } from "./sources/mcp/source.ts";
 import { CatalogError, CatalogSource } from "./sources/catalog/source.ts";
 import { ComposioClient, ComposioError, type ComposioToolkit } from "./sources/composio/client.ts";
 import { loadPolicies } from "./sources/composio/policy.ts";
 import { ComposioSource, connectMode } from "./sources/composio/source.ts";
+import { McpError } from "./sources/mcp/client.ts";
+import { McpSource } from "./sources/mcp/source.ts";
 import { ACCOUNT_ARGUMENT, ToolRegistry } from "./tools.ts";
 import type { FetchLike } from "./util/http.ts";
 import { NetPolicyError } from "./util/net-policy.ts";
@@ -40,28 +41,22 @@ export class ConnectError extends Error {
 }
 
 export interface ConnectEnv {
-  /** Build-time dependency injection; the SDK provides db/getKey per call, these cover what the contract lacks today. */
   manifest: Manifest;
   migrationsDir: string;
-  /** Instance KEK (TB_KEK), read lazily: the SDK may create it on first boot. */
-  kek: Buffer | (() => Buffer);
-  /** Workspace id from the SDK when it exposes one (pending request: OpContext.workspace). Fallback: the id
-   *  recorded from verified agent grants (`grant.claims.ws`). Composio user_id = workspace id (C12). */
-  workspaceId?(): string | null;
-  /** Bridge public origin for public routes. Pending SDK request: bridge publicUrl in the slice. */
-  publicOrigin(): string | null;
-  /** RunningApp.scopes once started. Pending SDK request: scope instance create from person ops / public routes. */
-  scopes(): ScopeStore | null;
   ErrorClass?: ErrorCtor;
   fetchImpl?: FetchLike;
   composioBaseUrl?: string;
   composioAllowedOrigins?: readonly string[];
   /** Data volume (catalog artifact cache). */
   dataDir?: string;
-  /** Exact origins allowed for catalog base URLs and the artifact without the public-address check (tests). */
+  /** Exact origins allowed for catalog/MCP base URLs without the public-address check (tests). */
   catalogAllowOrigins?: readonly string[];
   allowRelayOrigins?: readonly string[];
 }
+
+/** The SDK passes `SdkOpContext` (publicUrl, workspace, scopes, secrets: C31) where the frozen types say OpContext. */
+const extras = (ctx: OpContext): SdkOpContext => ctx as SdkOpContext;
+type ServiceCtx = { db: Db; getKey(name: string): Promise<string | null>; secrets?: AppSecrets };
 
 type Input = Record<string, unknown>;
 const asInput = (value: Json): Input => (value && typeof value === "object" && !Array.isArray(value) ? (value as Input) : {});
@@ -70,7 +65,7 @@ const str = (value: unknown): string | undefined => (typeof value === "string" &
 interface Services {
   accounts: AccountStore;
   tools: ToolRegistry;
-  secrets: SecretStore;
+  secrets: AppSecrets;
   composio: ComposioSource;
   buzz: BuzzIdentities;
   relay: BuzzRelay;
@@ -78,7 +73,7 @@ interface Services {
   mcp: McpSource;
 }
 
-export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.account.connect" | "connect.account.disconnect" | "connect.buzz.generate" | "connect.buzz.rotate"> {
+export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
   const Err: ErrorCtor = env.ErrorClass ?? ConnectError;
   const fail = (code: string, message: string, status = 400): never => {
     throw new Err(code, message, status);
@@ -100,11 +95,12 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
   };
 
   /** Services are bound to the SDK database handle (one process, one db). */
-  const services = (db: Db, getKey: (name: string) => Promise<string | null>): Services => {
+  const services = (ctx: ServiceCtx): Services => {
+    const { db, getKey } = ctx;
     if (cache && cache.db === db) return cache.services;
+    const secrets = ctx.secrets ?? fail("secrets_unavailable", "The SDK did not provide app secrets.", 500);
     const accounts = new AccountStore(db);
     const tools = new ToolRegistry(db);
-    const secrets = new SecretStore(db, new SecretBox(typeof env.kek === "function" ? env.kek() : env.kek));
     const composio = new ComposioSource({
       db,
       accounts,
@@ -164,25 +160,9 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
     detail: a.detail,
   });
 
-  const WS_SETTING = "workspace.id";
-  const storedWorkspace = (db: Db): string | null => {
-    const row = db.prepare("SELECT value FROM connect_settings WHERE key = ?").get(WS_SETTING);
-    return row ? String(row.value) : null;
-  };
-  /** Record the workspace id from a verified agent grant (the grant is verified by the SDK before handlers run). */
-  const rememberWorkspace = (ctx: OpContext): void => {
-    const ws = ctx.grant?.claims.ws;
-    if (ws && storedWorkspace(ctx.db) !== ws) {
-      ctx.db
-        .prepare("INSERT INTO connect_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
-        .run(WS_SETTING, ws, Date.now());
-    }
-  };
-  const workspaceOf = (db: Db): string | null => env.workspaceId?.() ?? storedWorkspace(db);
-  const workspace = (ctx: OpContext): string => {
-    rememberWorkspace(ctx);
-    return env.workspaceId?.() ?? ctx.grant?.claims.ws ?? storedWorkspace(ctx.db) ?? fail("workspace_unknown", "The workspace id is not known yet. Let one agent call Connect once, then try again.", 503);
-  };
+  /** Workspace id: from the SDK context (slice / person principal), else the verified grant. C12: Composio user_id. */
+  const workspace = (ctx: OpContext): string =>
+    extras(ctx).workspace ?? ctx.grant?.claims.ws ?? fail("workspace_unknown", "The workspace id is not known yet. Wait for the first workspace sync.", 503);
   const agentsOf = (db: Db): { id: string; name: string }[] =>
     db.prepare("SELECT id, name FROM connect_agents ORDER BY name, id").all().map((r) => ({ id: String(r.id), name: String(r.name) }));
 
@@ -205,15 +185,15 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
 
   const dynamicTools: DynamicHandlers = {
     async catalog(query: DynamicSearchInput | null, ctx): Promise<DynamicCatalogEntry[]> {
-      const s = services(ctx.db, ctx.getKey);
+      const s = services(ctx);
       return s.tools.search(query?.query ?? "", s.accounts.connectedServices(), query?.limit ?? 20);
     },
     async resolve(tool: string, ctx): Promise<DynamicResolution | null> {
-      return services(ctx.db, ctx.getKey).tools.resolve(tool);
+      return services(ctx).tools.resolve(tool);
     },
     async call(tool, args, ctx): Promise<Json> {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         const row = s.tools.get(tool) ?? fail("tool_unknown", `Unknown tool ${tool}. Search first.`, 404);
         const { [ACCOUNT_ARGUMENT]: selector, ...upstreamArgs } = args;
         const usable = await usableAccounts(ctx, s, row.service, row.crud);
@@ -244,11 +224,13 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
     },
   };
 
-  const handlers: Record<string, Handler> = {
+  const handlers: Record<string, Handler | HandlerSpec> = {
     // ── agent ops ──
-    async accounts_list(input, ctx) {
-      rememberWorkspace(ctx);
-      const s = services(ctx.db, ctx.getKey);
+    accounts_list: {
+      // Spans every account of the scope type; the handler filters with ctx.scope (SDK-API §3).
+      scope: () => null,
+      run: async (input, ctx) => {
+      const s = services(ctx);
       const service = str(asInput(input).service);
       const readable = new Set(await ctx.scope.readable(PRODUCT_SCOPE));
       const accounts = s.accounts
@@ -261,20 +243,21 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         out.push({ id: a.id, label: a.label, service: a.service, kind: a.kind, access: canDelete ? "read_update_delete" : canUpdate ? "read_update" : "read" });
       }
       return { accounts: out };
+      },
     },
     async buzz_identity(_input, ctx) {
-      const s = services(ctx.db, ctx.getKey);
+      const s = services(ctx);
       const identity = s.buzz.get(ctx.caller.id);
       return { npub: identity?.npub ?? null, pubkey: identity?.pubkey ?? null, relay: s.buzz.relayUrl() };
     },
 
     async buzz_channels(_input, ctx) {
-      return guard(async () => ({ channels: await services(ctx.db, ctx.getKey).relay.channels(ctx.caller.id) }));
+      return guard(async () => ({ channels: await services(ctx).relay.channels(ctx.caller.id) }));
     },
     async buzz_read(input, ctx) {
       return guard(async () => {
         const i = asInput(input);
-        const messages = await services(ctx.db, ctx.getKey).relay.read(ctx.caller.id, {
+        const messages = await services(ctx).relay.read(ctx.caller.id, {
           channel: String(i.channel ?? ""),
           ...(typeof i.since === "number" ? { since: i.since } : {}),
           ...(typeof i.limit === "number" ? { limit: i.limit } : {}),
@@ -290,7 +273,7 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         const root = str(i.threadRoot);
         ctx.receipt.summary(`Buzz post to channel ${channel.slice(0, 8)}…`);
         ctx.receipt.meta({ subjectKind: "as_itself", channel });
-        return services(ctx.db, ctx.getKey).relay.post(ctx.caller.id, {
+        return services(ctx).relay.post(ctx.caller.id, {
           channel,
           content: String(i.content ?? ""),
           ...(replyTo ? { replyTo: { id: replyTo, ...(root ? { root } : {}) } } : {}),
@@ -304,7 +287,7 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         const query = (str(asInput(input).query) ?? "").toLowerCase();
         const matches = (slug: string, name: string) => !query || slug.includes(query) || name.toLowerCase().includes(query);
         let catalogAvailable = true;
-        const apps = await services(ctx.db, ctx.getKey)
+        const apps = await services(ctx)
           .catalog.listApps()
           .catch((error: unknown) => {
             catalogAvailable = false;
@@ -324,19 +307,19 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       });
     },
     async accounts_overview(_input, ctx) {
-      const s = services(ctx.db, ctx.getKey);
+      const s = services(ctx);
       return { accounts: s.accounts.list().map(accountView) };
     },
     async account_connect(input, ctx) {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         const i = asInput(input);
         const service = str(i.service) ?? fail("service_required", "Pick a service.");
         const kind = (str(i.kind) ?? "as_me") as ConnectionKind;
         if (!CONNECTION_KINDS.includes(kind)) fail("kind_invalid", "Kind must be as_me or as_itself.");
         const agent = str(i.agent) ?? null;
         if (kind === "as_itself" && !agentsOf(ctx.db).some((a) => a.id === agent)) fail("agent_unknown", "Pick the agent this account belongs to.");
-        const origin = env.publicOrigin() ?? fail("public_origin_unknown", "The workspace door address is not known yet.", 503);
+        const origin = extras(ctx).publicUrl ?? fail("public_origin_unknown", "The workspace door address is not known yet.", 503);
         const result = await s.composio.startConnect({
           service,
           label: str(i.label) ?? service,
@@ -350,7 +333,7 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
     },
     async catalog_account_connect(input, ctx) {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         const i = asInput(input);
         const kind = (str(i.kind) ?? "as_me") as ConnectionKind;
         if (!CONNECTION_KINDS.includes(kind)) fail("kind_invalid", "Kind must be as_me or as_itself.");
@@ -365,13 +348,13 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
           kind,
           ownerAgent: kind === "as_itself" ? agent : null,
         });
-        await env.scopes()?.instances.create(PRODUCT_SCOPE, account.id, account.label, account.ownerAgent ? { ownerAgent: account.ownerAgent as `agt_${string}` } : {});
+        await extras(ctx).scopes.instances.create(PRODUCT_SCOPE, account.id, account.label, account.ownerAgent ? { ownerAgent: account.ownerAgent as `agt_${string}` } : {});
         return { account: accountView(account) };
       });
     },
     async mcp_account_connect(input, ctx) {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         const i = asInput(input);
         const kind = (str(i.kind) ?? "as_me") as ConnectionKind;
         if (!CONNECTION_KINDS.includes(kind)) fail("kind_invalid", "Kind must be as_me or as_itself.");
@@ -384,13 +367,13 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
           kind,
           ownerAgent: kind === "as_itself" ? agent : null,
         });
-        await env.scopes()?.instances.create(PRODUCT_SCOPE, account.id, account.label, account.ownerAgent ? { ownerAgent: account.ownerAgent as `agt_${string}` } : {});
+        await extras(ctx).scopes.instances.create(PRODUCT_SCOPE, account.id, account.label, account.ownerAgent ? { ownerAgent: account.ownerAgent as `agt_${string}` } : {});
         return { account: accountView(account) };
       });
     },
     async account_update(input, ctx) {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         const i = asInput(input);
         const id = str(i.id) ?? fail("id_required", "Account id is required.");
         if (!s.accounts.get(id)) fail("account_not_found", "Account not found.", 404);
@@ -399,23 +382,23 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
     },
     async account_disconnect(input, ctx) {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         const id = str(asInput(input).id) ?? fail("id_required", "Account id is required.");
         const account = s.accounts.get(id) ?? fail("account_not_found", "Account not found.", 404);
         const revoked =
           account.source === "composio"
             ? await s.composio.disconnect(account)
             : account.source === "catalog"
-              ? s.catalog.disconnect(account)
+              ? await s.catalog.disconnect(account)
               : account.source === "mcp"
-                ? s.mcp.disconnect(account)
+                ? await s.mcp.disconnect(account)
                 : s.accounts.update(id, { status: "revoked" });
         return { account: accountView(revoked) };
       });
     },
     async tools_refresh(input, ctx) {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         const service = str(asInput(input).service) ?? fail("service_required", "Pick a service.");
         const connected = s.accounts.list({ service, status: "connected" });
         if (connected.length === 0) fail("service_not_connected", "Connect an account first.", 409);
@@ -426,7 +409,7 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       });
     },
     async buzz_identities_list(_input, ctx) {
-      const s = services(ctx.db, ctx.getKey);
+      const s = services(ctx);
       const byAgent = new Map(s.buzz.list().map((i) => [i.agent, i]));
       return {
         relay: s.buzz.relayUrl(),
@@ -434,27 +417,27 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       };
     },
     async buzz_identities_generate(_input, ctx) {
-      const s = services(ctx.db, ctx.getKey);
-      const result = s.buzz.generateAll(agentsOf(ctx.db));
+      const s = services(ctx);
+      const result = await s.buzz.generateAll(agentsOf(ctx.db));
       return { created: result.created, existing: result.existing };
     },
     async buzz_identity_rotate(input, ctx) {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         const id = str(asInput(input).agent) ?? fail("agent_required", "Pick an agent.");
         const agent = agentsOf(ctx.db).find((a) => a.id === id) ?? fail("agent_unknown", "Unknown agent.", 404);
-        return { identity: s.buzz.rotate(agent) };
+        return { identity: await s.buzz.rotate(agent) };
       });
     },
     async buzz_relay_set(input, ctx) {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         return { relay: await s.buzz.setRelayUrl(String(asInput(input).relayUrl ?? "")) };
       });
     },
     async buzz_profile_publish(input, ctx) {
       return guard(async () => {
-        const s = services(ctx.db, ctx.getKey);
+        const s = services(ctx);
         const one = str(asInput(input).agent);
         const targets = one ? [one] : s.buzz.list().map((i) => i.agent);
         const published = [];
@@ -464,7 +447,8 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
     },
   };
 
-  const composioCallback: PublicHandler = async (req, ctx) => {
+  const composioCallback: PublicHandler = async (req, rawCtx) => {
+    const ctx = rawCtx as SdkPublicContext;
     const url = new URL(req.url);
     const page = (ok: boolean, title: string, detail: string, status: number) =>
       new Response(
@@ -472,14 +456,14 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } },
       );
     try {
-      const s = services(ctx.db, ctx.getKey);
-      const workspaceId = workspaceOf(ctx.db) ?? fail("workspace_unknown", "The workspace id is not known yet.", 503);
+      const s = services(ctx);
+      const workspaceId = ctx.workspace ?? fail("workspace_unknown", "The workspace id is not known yet.", 503);
       const account = await s.composio.completeCallback({
         state: url.searchParams.get("state"),
         connectedAccountId: url.searchParams.get("connected_account_id") ?? url.searchParams.get("connectedAccountId"),
         workspaceId,
       });
-      await env.scopes()?.instances.create(PRODUCT_SCOPE, account.id, account.label, account.ownerAgent ? { ownerAgent: account.ownerAgent as `agt_${string}` } : {});
+      await ctx.scopes.instances.create(PRODUCT_SCOPE, account.id, account.label, account.ownerAgent ? { ownerAgent: account.ownerAgent as `agt_${string}` } : {});
       return page(true, "Connected", `${escapeHtml(account.label)} is connected. Set each agent's access in Connect.`, 200);
     } catch (error) {
       ctx.log.warn("composio callback failed", { code: (error as { code?: string }).code ?? "error" });
@@ -504,7 +488,6 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         ctx.db.prepare("DELETE FROM connect_agents WHERE id = ?").run(agent.id);
       },
     },
-    auditActions: ["connect.account.connect", "connect.account.disconnect", "connect.buzz.generate", "connect.buzz.rotate"] as const,
   };
 }
 

@@ -7,9 +7,10 @@
  * - Optional: publish a kind 0 profile ({name, display_name, about}) to the configured relay over the relay's
  *   HTTP endpoint with NIP-98 auth. During opt2 only to a test relay (C22).
  */
-import type { Db } from "@opt2-tealbrick/spec/sdk";
 
-import type { SecretStore } from "../../secrets.ts";
+
+import type { AppSecrets } from "@opt2-tealbrick/miniapp-sdk";
+import type { Db } from "@opt2-tealbrick/spec/sdk";
 import { type FetchLike, requestJson } from "../../util/http.ts";
 import { assertEndpointAllowed, type Lookup } from "../../util/net-policy.ts";
 import { generateSecretKey, nip98Header, npubEncode, publicKeyOf, signEvent } from "./nostr.ts";
@@ -34,7 +35,7 @@ export type BuzzIdentityView = {
 
 export interface BuzzDeps {
   db: Db;
-  secrets: SecretStore;
+  secrets: AppSecrets;
   fetchImpl?: FetchLike;
   lookup?: Lookup;
   /** Exact relay origins allowed without the public-address check (test relay). */
@@ -94,20 +95,24 @@ export class BuzzIdentities {
   }
 
   /** The one owner action: create identities for every listed agent that has none. Existing identities stay. */
-  generateAll(agents: readonly AgentRef[]): { created: BuzzIdentityView[]; existing: BuzzIdentityView[] } {
+  async generateAll(agents: readonly AgentRef[]): Promise<{ created: BuzzIdentityView[]; existing: BuzzIdentityView[] }> {
     const now = this.#now();
-    const createdIds: string[] = [];
-    this.#d.db.transaction(() => {
-      for (const agent of agents) {
-        if (this.get(agent.id)) continue;
-        const secret = generateSecretKey();
-        this.#d.secrets.put(`${SECRET_PREFIX}${agent.id}`, secret, now);
-        this.#d.db
-          .prepare("INSERT INTO connect_buzz_identities (agent, pubkey, display_name, created_at) VALUES (?, ?, ?, ?)")
-          .run(agent.id, publicKeyOf(secret), cleanName(agent.name), now);
-        createdIds.push(agent.id);
-      }
-    });
+    const fresh = agents.filter((agent) => !this.get(agent.id)).map((agent) => ({ agent, secret: generateSecretKey() }));
+    // Seal every key first; the identity rows are then written in one transaction (all agents or none).
+    try {
+      for (const { agent, secret } of fresh) await this.#d.secrets.put(`${SECRET_PREFIX}${agent.id}`, secret);
+      this.#d.db.transaction(() => {
+        for (const { agent, secret } of fresh) {
+          this.#d.db
+            .prepare("INSERT INTO connect_buzz_identities (agent, pubkey, display_name, created_at) VALUES (?, ?, ?, ?)")
+            .run(agent.id, publicKeyOf(secret), cleanName(agent.name), now);
+        }
+      });
+    } catch (error) {
+      for (const { agent } of fresh) await this.#d.secrets.delete(`${SECRET_PREFIX}${agent.id}`).catch(() => undefined);
+      throw error;
+    }
+    const createdIds = fresh.map((f) => f.agent.id);
     const all = this.list().filter((identity) => agents.some((a) => a.id === identity.agent));
     return {
       created: all.filter((i) => createdIds.includes(i.agent)),
@@ -115,11 +120,11 @@ export class BuzzIdentities {
     };
   }
 
-  rotate(agent: AgentRef): BuzzIdentityView {
+  async rotate(agent: AgentRef): Promise<BuzzIdentityView> {
     const now = this.#now();
+    const secret = generateSecretKey();
+    await this.#d.secrets.put(`${SECRET_PREFIX}${agent.id}`, secret);
     this.#d.db.transaction(() => {
-      const secret = generateSecretKey();
-      this.#d.secrets.put(`${SECRET_PREFIX}${agent.id}`, secret, now);
       this.#d.db
         .prepare(
           `INSERT INTO connect_buzz_identities (agent, pubkey, display_name, created_at) VALUES (?, ?, ?, ?)
@@ -133,11 +138,9 @@ export class BuzzIdentities {
     return rotated;
   }
 
-  remove(agent: string): void {
-    this.#d.db.transaction(() => {
-      this.#d.secrets.delete(`${SECRET_PREFIX}${agent}`);
-      this.#d.db.prepare("DELETE FROM connect_buzz_identities WHERE agent = ?").run(agent);
-    });
+  async remove(agent: string): Promise<void> {
+    await this.#d.secrets.delete(`${SECRET_PREFIX}${agent}`);
+    this.#d.db.prepare("DELETE FROM connect_buzz_identities WHERE agent = ?").run(agent);
   }
 
   relayUrl(): string | null {
@@ -165,15 +168,15 @@ export class BuzzIdentities {
   }
 
   /** Sign an allowed-kind event as the agent. The secret is opened only inside this call. */
-  sign(agent: string, input: { kind: number; tags: string[][]; content: string }) {
-    const secret = this.#d.secrets.get(`${SECRET_PREFIX}${agent}`);
+  async sign(agent: string, input: { kind: number; tags: string[][]; content: string }) {
+    const secret = await this.#d.secrets.get(`${SECRET_PREFIX}${agent}`);
     if (!secret) throw new Error("buzz_identity_missing");
     return signEvent(secret, { ...input, created_at: Math.floor(this.#now() / 1000) });
   }
 
   /** NIP-98 Authorization header signed by the agent's key for one relay HTTP request. */
-  authHeader(agent: string, input: { url: string; method: string; body?: string }): string {
-    const secret = this.#d.secrets.get(`${SECRET_PREFIX}${agent}`);
+  async authHeader(agent: string, input: { url: string; method: string; body?: string }): Promise<string> {
+    const secret = await this.#d.secrets.get(`${SECRET_PREFIX}${agent}`);
     if (!secret) throw new Error("buzz_identity_missing");
     return nip98Header(secret, { ...input, now: Math.floor(this.#now() / 1000) });
   }
@@ -195,13 +198,13 @@ export class BuzzIdentities {
     if (!relay) throw new Error("buzz_relay_missing");
     const httpUrl = `${relay.replace(/^wss:/u, "https:")}/events`;
     await assertEndpointAllowed(httpUrl, { schemes: ["https:"], ...this.#policy() });
-    const event = this.sign(agent, {
+    const event = await this.sign(agent, {
       kind: 0,
       tags: [],
       content: JSON.stringify({ name: identity.displayName, display_name: identity.displayName, about: about.slice(0, 280) }),
     });
     const body = JSON.stringify(event);
-    const secret = this.#d.secrets.get(`${SECRET_PREFIX}${agent}`);
+    const secret = await this.#d.secrets.get(`${SECRET_PREFIX}${agent}`);
     if (!secret) throw new Error("buzz_identity_missing");
     const authorization = nip98Header(secret, { url: httpUrl, method: "POST", body, now: Math.floor(this.#now() / 1000) });
     const answer = await requestJson<{ accepted?: boolean; message?: string }>({

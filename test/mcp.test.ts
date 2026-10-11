@@ -5,12 +5,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import type { Handler } from "@opt2-tealbrick/spec/sdk";
 
 import { type ConnectError, createConnectApp } from "../src/app.ts";
 import { McpClient, SseParser } from "../src/sources/mcp/client.ts";
 import { validateHeaders } from "../src/sources/mcp/source.ts";
-import { root, testCtx, testDb } from "./helpers.ts";
+import { handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const URL_ = "https://mcp.example.com/mcp";
 
@@ -70,12 +69,13 @@ test("app: connect an MCP server, classes from annotations, tiers enforced, head
   const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
   const server = fakeServer();
   const db = testDb();
-  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), kek: Buffer.alloc(32, 9), publicOrigin: () => null, scopes: () => null, fetchImpl: server.impl, catalogAllowOrigins: ["https://mcp.example.com"] });
+  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), fetchImpl: server.impl, catalogAllowOrigins: ["https://mcp.example.com"] });
   const person = testCtx({ db, person: true });
-  await assert.rejects((app.handlers.mcp_account_connect as Handler)({ label: "Notes", url: URL_, headers: { Authorization: "Bearer bad" } }, person), (e: ConnectError) => e.code === "mcp_unauthorized");
-  await assert.rejects((app.handlers.mcp_account_connect as Handler)({ label: "Notes", url: "https://mcp.example.com/mcp?key=1", headers: {} }, person), (e: ConnectError) => e.code === "mcp_url_invalid");
-  const out = (await (app.handlers.mcp_account_connect as Handler)({ label: "Notes", url: URL_, headers: { Authorization: "Bearer good" } }, person)) as { account: { id: string; service: string } };
-  assert.ok(!JSON.stringify(db.prepare("SELECT * FROM connect_secrets").all()).includes("Bearer good"));
+  await assert.rejects(handlerOf(app, "mcp_account_connect")({ label: "Notes", url: URL_, headers: { Authorization: "Bearer bad" } }, person), (e: ConnectError) => e.code === "mcp_unauthorized");
+  await assert.rejects(handlerOf(app, "mcp_account_connect")({ label: "Notes", url: "https://mcp.example.com/mcp?key=1", headers: {} }, person), (e: ConnectError) => e.code === "mcp_url_invalid");
+  const out = (await handlerOf(app, "mcp_account_connect")({ label: "Notes", url: URL_, headers: { Authorization: "Bearer good" } }, person)) as { account: { id: string; service: string } };
+  assert.deepEqual(secretsFor(db).names(), [`account:${out.account.id}`]);
+  assert.ok(!JSON.stringify(db.prepare("SELECT * FROM connect_accounts").all()).includes("Bearer good"));
   const classes = Object.fromEntries(db.prepare("SELECT upstream, effect FROM connect_tools").all().map((r) => [r.upstream, r.effect]));
   assert.deepEqual(classes, { search_notes: "read", send_digest: "outward", delete_note: "destructive" });
   const names = Object.fromEntries(db.prepare("SELECT upstream, name FROM connect_tools").all().map((r) => [r.upstream, String(r.name)]));
@@ -84,7 +84,7 @@ test("app: connect an MCP server, classes from annotations, tiers enforced, head
   const reader = testCtx({ db, access: { [out.account.id]: "read" } });
   assert.deepEqual(await dyn.call(names.search_notes ?? "", { q: "x" }, reader), { account: "Notes", untrusted: true, data: { content: [{ type: "text", text: "ran search_notes" }] } });
   await assert.rejects(dyn.call(names.send_digest ?? "", {}, reader), (e: ConnectError) => e.code === "scope_denied");
-  const disc = (await (app.handlers.account_disconnect as Handler)({ id: out.account.id }, person)) as { account: { status: string } };
+  const disc = (await handlerOf(app, "account_disconnect")({ id: out.account.id }, person)) as { account: { status: string } };
   assert.equal(disc.account.status, "revoked");
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM connect_tools").get()?.n, 0);
 });
