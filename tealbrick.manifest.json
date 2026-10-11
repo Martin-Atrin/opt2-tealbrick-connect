@@ -299,7 +299,7 @@
       "id": "catalog",
       "version": "0.1.0",
       "sha256": "c366f737c80d787ca5364ca6af7e20b96d113ed4ba46c57ee610ca7fbc81d2e2",
-      "url": "https://github.com/Martin-Atrin/opt2-tealbrick-connect/releases/download/catalog-v0.1.0/tealbrick-catalog-0.1.0.json.gz"
+      "url": "https://github.com/Martin-Atrin/opt2-tealbrick-connect/releases/download/catalog-0.1.0/tealbrick-catalog-0.1.0.json.gz"
     }
   ],
   "publicRoutes": [
