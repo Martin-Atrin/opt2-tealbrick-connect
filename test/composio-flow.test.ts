@@ -190,7 +190,7 @@ test("catalog search offers only connected services; resolve returns the class",
 test("services search reports a missing Composio key instead of failing", async () => {
   const s = setup();
   const noKey = await s.h("services_search")({ query: "gm" }, testCtx({ db: s.db }));
-  assert.deepEqual(noKey, { composioKey: false, services: [] });
+  assert.deepEqual(noKey, { composioKey: false, catalogAvailable: false, services: [] });
   const withKey = (await s.h("services_search")({ query: "gm" }, testCtx({ db: s.db, keys: { COMPOSIO_API_KEY: KEY } }))) as { services: { service: string; connectMode: string }[] };
   assert.deepEqual(withKey.services.map((x) => [x.service, x.connectMode]), [["gmail", "ready_managed"]]);
 });

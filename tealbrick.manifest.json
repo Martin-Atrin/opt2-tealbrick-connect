@@ -489,6 +489,63 @@
       "audience": "person"
     },
     {
+      "id": "catalog_account_connect",
+      "title": "Connect a self-hosted app",
+      "description": "Connect an app from the Tealbrick catalog with its address and API key. The key stays in Connect.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service",
+          "label",
+          "baseUrl",
+          "credentials"
+        ],
+        "properties": {
+          "service": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "baseUrl": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "credentials": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "maxProperties": 4
+          },
+          "kind": {
+            "enum": [
+              "as_me",
+              "as_itself"
+            ]
+          },
+          "agent": {
+            "type": "string",
+            "maxLength": 64
+          }
+        }
+      },
+      "output": {
+        "type": "object"
+      },
+      "crud": [
+        "create"
+      ],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
       "id": "account_update",
       "title": "Rename an account",
       "description": "Change the label of a connected account.",

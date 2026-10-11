@@ -10,6 +10,8 @@ import { type Account, AccountStore, CONNECTION_KINDS, type ConnectionKind } fro
 import { BuzzIdentities } from "./channels/buzz/identity.ts";
 import { BuzzRelay } from "./channels/buzz/relay.ts";
 import { SecretBox, SecretStore } from "./secrets.ts";
+import { CatalogCallError } from "./sources/catalog/http.ts";
+import { CatalogError, CatalogSource } from "./sources/catalog/source.ts";
 import { ComposioClient, ComposioError, type ComposioToolkit } from "./sources/composio/client.ts";
 import { loadPolicies } from "./sources/composio/policy.ts";
 import { ComposioSource, connectMode } from "./sources/composio/source.ts";
@@ -52,6 +54,10 @@ export interface ConnectEnv {
   fetchImpl?: FetchLike;
   composioBaseUrl?: string;
   composioAllowedOrigins?: readonly string[];
+  /** Data volume (catalog artifact cache). */
+  dataDir?: string;
+  /** Exact origins allowed for catalog base URLs and the artifact without the public-address check (tests). */
+  catalogAllowOrigins?: readonly string[];
   allowRelayOrigins?: readonly string[];
 }
 
@@ -66,6 +72,7 @@ interface Services {
   composio: ComposioSource;
   buzz: BuzzIdentities;
   relay: BuzzRelay;
+  catalog: CatalogSource;
 }
 
 export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.account.connect" | "connect.account.disconnect" | "connect.buzz.generate" | "connect.buzz.rotate"> {
@@ -109,7 +116,16 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       ...(env.allowRelayOrigins ? { allowRelayOrigins: env.allowRelayOrigins } : {}),
     });
     const relay = new BuzzRelay(buzz, env.fetchImpl);
-    const built = { accounts, tools, secrets, composio, buzz, relay };
+    const catalog = new CatalogSource({
+      artifact: env.manifest.artifacts?.find((a) => a.id === "catalog"),
+      dataDir: env.dataDir ?? "/data",
+      accounts,
+      tools,
+      secrets,
+      ...(env.fetchImpl ? { fetchImpl: env.fetchImpl } : {}),
+      ...(env.catalogAllowOrigins ? { allowOrigins: env.catalogAllowOrigins } : {}),
+    });
+    const built = { accounts, tools, secrets, composio, buzz, relay, catalog };
     cache = { db, services: built };
     return built;
   };
@@ -120,6 +136,8 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       if (error instanceof Err) throw error;
       if (error instanceof ComposioError) fail(error.code, error.message, error.status);
       if (error instanceof NetPolicyError) fail(error.code, error.message, 422);
+      if (error instanceof CatalogError) fail(error.code, error.message, error.code === "catalog_app_unknown" || error.code === "tool_unknown" ? 404 : 400);
+      if (error instanceof CatalogCallError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
       if (error instanceof Error && /^[a-z_]+(?::|$)/u.test(error.message)) fail(error.message.split(":")[0] ?? "connect_error", error.message, 400);
       throw error;
     });
@@ -205,8 +223,10 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         if (!account) return fail("scope_denied", "No usable account.", 403);
         ctx.receipt.summary(`${row.title} via ${account.label}`.slice(0, 280));
         ctx.receipt.meta({ subjectKind: account.kind, tool: row.upstream, service: row.service, account: account.label });
-        if (row.source !== "composio") fail("source_not_ready", `${row.source} tools are not available yet.`, 501);
-        const data = await s.composio.execute(account, row.upstream, upstreamArgs, workspace(ctx));
+        let data: unknown;
+        if (row.source === "composio") data = await s.composio.execute(account, row.upstream, upstreamArgs, workspace(ctx));
+        else if (row.source === "catalog") data = await s.catalog.execute(account, row.name, upstreamArgs);
+        else fail("source_not_ready", `${row.source} tools are not available yet.`, 501);
         return { account: account.label, untrusted: true, data: (data ?? null) as Json };
       });
     },
@@ -270,13 +290,25 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
     async services_search(input, ctx) {
       return guard(async () => {
         const query = (str(asInput(input).query) ?? "").toLowerCase();
-        if (!(await ctx.getKey(COMPOSIO_KEY))) return { composioKey: false, services: [] };
+        const matches = (slug: string, name: string) => !query || slug.includes(query) || name.toLowerCase().includes(query);
+        let catalogAvailable = true;
+        const apps = await services(ctx.db, ctx.getKey)
+          .catalog.listApps()
+          .catch((error: unknown) => {
+            catalogAvailable = false;
+            ctx.log.warn("catalog unavailable", { code: (error as { code?: string }).code ?? "error" });
+            return [];
+          });
+        const catalog = apps
+          .filter((a) => matches(a.service, a.name))
+          .map((a) => ({ service: a.service, name: a.name, description: a.description, logo: null, source: "catalog", connectMode: "api_key", fields: a.fields, baseUrlExample: a.baseUrlExample }));
+        if (!(await ctx.getKey(COMPOSIO_KEY))) return { composioKey: false, catalogAvailable, services: catalog };
         const toolkits = await toolkitCache.get(() => composioClient(ctx.getKey));
         const hits = toolkits
-          .filter((t) => !query || t.slug.includes(query) || t.name.toLowerCase().includes(query))
+          .filter((t) => matches(t.slug, t.name))
           .slice(0, 30)
           .map((t) => ({ service: t.slug, name: t.name, description: t.description, logo: t.logo, source: "composio", connectMode: connectMode(t) }));
-        return { composioKey: true, services: hits };
+        return { composioKey: true, catalogAvailable, services: [...catalog, ...hits] };
       });
     },
     async accounts_overview(_input, ctx) {
@@ -304,6 +336,27 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         return { account: accountView(result.account), redirectUrl: result.redirectUrl };
       });
     },
+    async catalog_account_connect(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx.db, ctx.getKey);
+        const i = asInput(input);
+        const kind = (str(i.kind) ?? "as_me") as ConnectionKind;
+        if (!CONNECTION_KINDS.includes(kind)) fail("kind_invalid", "Kind must be as_me or as_itself.");
+        const agent = str(i.agent) ?? null;
+        if (kind === "as_itself" && !agentsOf(ctx.db).some((a) => a.id === agent)) fail("agent_unknown", "Pick the agent this account belongs to.");
+        const credentials = (i.credentials && typeof i.credentials === "object" ? i.credentials : {}) as Record<string, string>;
+        const account = await s.catalog.connect({
+          service: str(i.service) ?? fail("service_required", "Pick an app."),
+          label: str(i.label) ?? String(i.service),
+          baseUrl: str(i.baseUrl) ?? fail("base_url_required", "Enter the app's address."),
+          credentials,
+          kind,
+          ownerAgent: kind === "as_itself" ? agent : null,
+        });
+        await env.scopes()?.instances.create(PRODUCT_SCOPE, account.id, account.label, account.ownerAgent ? { ownerAgent: account.ownerAgent as `agt_${string}` } : {});
+        return { account: accountView(account) };
+      });
+    },
     async account_update(input, ctx) {
       return guard(async () => {
         const s = services(ctx.db, ctx.getKey);
@@ -318,7 +371,12 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
         const s = services(ctx.db, ctx.getKey);
         const id = str(asInput(input).id) ?? fail("id_required", "Account id is required.");
         const account = s.accounts.get(id) ?? fail("account_not_found", "Account not found.", 404);
-        const revoked = account.source === "composio" ? await s.composio.disconnect(account) : s.accounts.update(id, { status: "revoked" });
+        const revoked =
+          account.source === "composio"
+            ? await s.composio.disconnect(account)
+            : account.source === "catalog"
+              ? s.catalog.disconnect(account)
+              : s.accounts.update(id, { status: "revoked" });
         return { account: accountView(revoked) };
       });
     },
@@ -326,8 +384,10 @@ export function createConnectApp(env: ConnectEnv): AppDefinition<"connect.accoun
       return guard(async () => {
         const s = services(ctx.db, ctx.getKey);
         const service = str(asInput(input).service) ?? fail("service_required", "Pick a service.");
-        if (s.accounts.list({ service, status: "connected" }).length === 0) fail("service_not_connected", "Connect an account first.", 409);
-        return { service, tools: await s.composio.syncTools(service) };
+        const connected = s.accounts.list({ service, status: "connected" });
+        if (connected.length === 0) fail("service_not_connected", "Connect an account first.", 409);
+        const tools = connected[0]?.source === "catalog" ? await s.catalog.syncTools(service) : await s.composio.syncTools(service);
+        return { service, tools };
       });
     },
     async buzz_identities_list(_input, ctx) {
