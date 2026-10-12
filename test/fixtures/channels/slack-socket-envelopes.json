@@ -1,0 +1,140 @@
+{
+  "_source": "Shapes recorded from Slack Socket Mode docs (hello, events_api, disconnect). Ids are fake.",
+  "hello": {
+    "type": "hello",
+    "num_connections": 1,
+    "debug_info": { "host": "applink-test", "build_number": 10, "approximate_connection_time": 18060 },
+    "connection_info": { "app_id": "A0TESTAPP1" }
+  },
+  "message": {
+    "envelope_id": "env-0001",
+    "type": "events_api",
+    "accepts_response_payload": false,
+    "retry_attempt": 0,
+    "retry_reason": "",
+    "payload": {
+      "token": "legacy-verification-token-unused",
+      "team_id": "T0TESTTEAM",
+      "api_app_id": "A0TESTAPP1",
+      "event": {
+        "type": "message",
+        "channel": "C0GENERAL1",
+        "user": "U0HUMAN001",
+        "text": "<@U0BOTUSER1> can you check &lt;this&gt; &amp; that?‮",
+        "ts": "1700000200.000100",
+        "channel_type": "channel",
+        "event_ts": "1700000200.000100",
+        "user_profile": { "display_name": "Ada", "real_name": "Ada Lovelace", "name": "ada" }
+      },
+      "type": "event_callback",
+      "event_id": "Ev0MSG0001",
+      "event_time": 1700000200
+    }
+  },
+  "app_mention_same_message": {
+    "envelope_id": "env-0002",
+    "type": "events_api",
+    "accepts_response_payload": false,
+    "retry_attempt": 0,
+    "retry_reason": "",
+    "payload": {
+      "team_id": "T0TESTTEAM",
+      "api_app_id": "A0TESTAPP1",
+      "event": {
+        "type": "app_mention",
+        "channel": "C0GENERAL1",
+        "user": "U0HUMAN001",
+        "text": "<@U0BOTUSER1> can you check &lt;this&gt; &amp; that?",
+        "ts": "1700000200.000100",
+        "event_ts": "1700000200.000100"
+      },
+      "type": "event_callback",
+      "event_id": "Ev0MENTION1",
+      "event_time": 1700000200
+    }
+  },
+  "bot_message": {
+    "envelope_id": "env-0003",
+    "type": "events_api",
+    "accepts_response_payload": false,
+    "payload": {
+      "team_id": "T0TESTTEAM",
+      "event": {
+        "type": "message",
+        "subtype": "bot_message",
+        "channel": "C0GENERAL1",
+        "bot_id": "B0OTHERBOT",
+        "text": "beep",
+        "ts": "1700000201.000100",
+        "channel_type": "channel"
+      },
+      "type": "event_callback",
+      "event_id": "Ev0BOTMSG01",
+      "event_time": 1700000201
+    }
+  },
+  "edit": {
+    "envelope_id": "env-0004",
+    "type": "events_api",
+    "accepts_response_payload": false,
+    "payload": {
+      "team_id": "T0TESTTEAM",
+      "event": {
+        "type": "message",
+        "subtype": "message_changed",
+        "channel": "C0GENERAL1",
+        "hidden": true,
+        "message": { "type": "message", "user": "U0HUMAN001", "text": "edited", "ts": "1700000200.000100" },
+        "ts": "1700000202.000100",
+        "channel_type": "channel"
+      },
+      "type": "event_callback",
+      "event_id": "Ev0EDIT0001",
+      "event_time": 1700000202
+    }
+  },
+  "dm_thread_reply": {
+    "envelope_id": "env-0005",
+    "type": "events_api",
+    "accepts_response_payload": false,
+    "payload": {
+      "team_id": "T0TESTTEAM",
+      "event": {
+        "type": "message",
+        "channel": "D0DIRECT01",
+        "user": "U0HUMAN002",
+        "text": "replying in thread",
+        "ts": "1700000300.000300",
+        "thread_ts": "1700000250.000100",
+        "channel_type": "im"
+      },
+      "type": "event_callback",
+      "event_id": "Ev0DMREPLY1",
+      "event_time": 1700000300
+    }
+  },
+  "other_team": {
+    "envelope_id": "env-0006",
+    "type": "events_api",
+    "accepts_response_payload": false,
+    "payload": {
+      "team_id": "T0OTHERTEAM",
+      "event": {
+        "type": "message",
+        "channel": "C0ELSEWHERE",
+        "user": "U0STRANGER",
+        "text": "hi from another workspace",
+        "ts": "1700000400.000100",
+        "channel_type": "channel"
+      },
+      "type": "event_callback",
+      "event_id": "Ev0OTHER001",
+      "event_time": 1700000400
+    }
+  },
+  "disconnect": {
+    "type": "disconnect",
+    "reason": "refresh_requested",
+    "debug_info": { "host": "applink-test" }
+  }
+}

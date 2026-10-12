@@ -1,0 +1,155 @@
+{
+  "_comment": "Recorded-shape Discord REST v10 and gateway v10 payloads (discord.com/developers/docs). Ids and names are invented.",
+  "usersMe": {
+    "id": "1100000000000000001",
+    "username": "teal-helper",
+    "global_name": null,
+    "avatar": null,
+    "discriminator": "0",
+    "public_flags": 0,
+    "flags": 0,
+    "bot": true,
+    "banner": null,
+    "accent_color": null,
+    "mfa_enabled": true,
+    "locale": "en-US",
+    "premium_type": 0
+  },
+  "application": {
+    "id": "1100000000000000001",
+    "name": "Teal Helper",
+    "icon": null,
+    "description": "",
+    "bot_public": false,
+    "bot_require_code_grant": false,
+    "flags": 565248
+  },
+  "guilds": [
+    { "id": "2200000000000000001", "name": "Acme HQ", "icon": null, "owner": false, "permissions": "2248473465835073", "features": [] },
+    { "id": "2200000000000000002", "name": "Old Server", "icon": null, "owner": false, "permissions": "0", "features": [] }
+  ],
+  "guildChannels": [
+    { "id": "3300000000000000004", "type": 4, "guild_id": "2200000000000000001", "position": 0, "name": "Text Channels", "parent_id": null },
+    { "id": "3300000000000000002", "type": 0, "guild_id": "2200000000000000001", "position": 2, "name": "random", "parent_id": "3300000000000000004", "topic": null, "nsfw": false },
+    { "id": "3300000000000000001", "type": 0, "guild_id": "2200000000000000001", "position": 1, "name": "general", "parent_id": "3300000000000000004", "topic": "Say hi", "nsfw": false },
+    { "id": "3300000000000000003", "type": 2, "guild_id": "2200000000000000001", "position": 3, "name": "Voice", "parent_id": null, "bitrate": 64000 },
+    { "id": "3300000000000000005", "type": 5, "guild_id": "2200000000000000001", "position": 4, "name": "news", "parent_id": null }
+  ],
+  "messageCreated": {
+    "id": "4400000000000000009",
+    "type": 0,
+    "content": "hello from the agent",
+    "channel_id": "3300000000000000001",
+    "author": { "id": "1100000000000000001", "username": "teal-helper", "bot": true },
+    "attachments": [],
+    "embeds": [],
+    "mentions": [],
+    "mention_roles": [],
+    "pinned": false,
+    "mention_everyone": false,
+    "tts": false,
+    "timestamp": "2026-10-12T09:00:00.000000+00:00",
+    "edited_timestamp": null,
+    "flags": 0
+  },
+  "dmChannel": {
+    "id": "5500000000000000001",
+    "type": 1,
+    "last_message_id": null,
+    "flags": 0,
+    "recipients": [{ "id": "6600000000000000001", "username": "ada", "global_name": "Ada", "discriminator": "0" }]
+  },
+  "gateway": {
+    "hello": { "t": null, "s": null, "op": 10, "d": { "heartbeat_interval": 41250, "_trace": ["[\"gateway-prd-us-east1-b-abcd\",{\"micros\":0.0}]"] } },
+    "ack": { "t": null, "s": null, "op": 11, "d": null },
+    "ready": {
+      "t": "READY",
+      "s": 1,
+      "op": 0,
+      "d": {
+        "v": 10,
+        "user": { "id": "1100000000000000001", "username": "teal-helper", "bot": true, "discriminator": "0" },
+        "guilds": [{ "id": "2200000000000000001", "unavailable": true }],
+        "session_id": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "resume_gateway_url": "wss://gateway-us-east1-b.discord.gg",
+        "session_type": "normal",
+        "application": { "id": "1100000000000000001", "flags": 565248 }
+      }
+    },
+    "messageGuild": {
+      "t": "MESSAGE_CREATE",
+      "s": 2,
+      "op": 0,
+      "d": {
+        "type": 0,
+        "tts": false,
+        "timestamp": "2026-10-12T09:01:02.345000+00:00",
+        "pinned": false,
+        "nonce": "1300000000000000000",
+        "mentions": [],
+        "mention_roles": [],
+        "mention_everyone": false,
+        "member": { "roles": [], "nick": "Ada (ops)", "joined_at": "2025-01-01T00:00:00.000000+00:00", "deaf": false, "mute": false },
+        "id": "4400000000000000001",
+        "flags": 0,
+        "embeds": [],
+        "edited_timestamp": null,
+        "content": "can the agent check the build?",
+        "components": [],
+        "channel_type": 0,
+        "channel_id": "3300000000000000001",
+        "author": { "username": "ada", "public_flags": 0, "id": "6600000000000000001", "global_name": "Ada", "discriminator": "0", "avatar": null },
+        "attachments": [
+          { "id": "7700000000000000001", "filename": "build.log", "size": 2048, "url": "https://cdn.discordapp.com/attachments/x/y/build.log", "content_type": "text/plain; charset=utf-8" }
+        ],
+        "guild_id": "2200000000000000001"
+      }
+    },
+    "messageOtherBot": {
+      "t": "MESSAGE_CREATE",
+      "s": 3,
+      "op": 0,
+      "d": {
+        "type": 0,
+        "id": "4400000000000000002",
+        "content": "beep",
+        "channel_id": "3300000000000000001",
+        "author": { "username": "ci-bot", "id": "8800000000000000001", "bot": true, "discriminator": "0" },
+        "attachments": [],
+        "timestamp": "2026-10-12T09:01:03.000000+00:00",
+        "guild_id": "2200000000000000001"
+      }
+    },
+    "messageOwn": {
+      "t": "MESSAGE_CREATE",
+      "s": 4,
+      "op": 0,
+      "d": {
+        "type": 0,
+        "id": "4400000000000000003",
+        "content": "my own post",
+        "channel_id": "3300000000000000001",
+        "author": { "username": "teal-helper", "id": "1100000000000000001", "discriminator": "0" },
+        "attachments": [],
+        "timestamp": "2026-10-12T09:01:04.000000+00:00",
+        "guild_id": "2200000000000000001"
+      }
+    },
+    "messageDmReply": {
+      "t": "MESSAGE_CREATE",
+      "s": 5,
+      "op": 0,
+      "d": {
+        "type": 19,
+        "id": "4400000000000000004",
+        "content": "thanks!",
+        "channel_id": "5500000000000000001",
+        "channel_type": 1,
+        "author": { "username": "ada", "id": "6600000000000000001", "global_name": "Ada", "discriminator": "0" },
+        "attachments": [],
+        "message_reference": { "type": 0, "message_id": "4400000000000000009", "channel_id": "5500000000000000001" },
+        "timestamp": "2026-10-12T09:01:05.000000+00:00"
+      }
+    }
+  }
+}

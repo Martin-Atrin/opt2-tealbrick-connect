@@ -136,8 +136,14 @@ try {
     if (again.channel !== first.channel) throw new Error("second DM opened a new conversation");
     return `channel ${first.channel.slice(0, 8)}…`;
   });
+  await step("agent 2 reacts; agent 1 edits then deletes its own post", async () => {
+    const react = await relay.react(agents[1]?.id ?? "", { channel, messageId: postId, emoji: "👍" });
+    const edit = await relay.edit(agents[0]?.id ?? "", { channel, messageId: postId, content: "Hello from agent 1 (edited)" });
+    const del = await relay.remove(agents[0]?.id ?? "", { channel, messageId: postId });
+    return `reaction ${react.id.slice(0, 8)}…, edit ${edit.id.slice(0, 8)}…, delete ${del.id.slice(0, 8)}…`;
+  });
 } catch {
   // reported below
 }
 for (const s of steps) console.log(`${s.ok ? "PASS" : "FAIL"}  ${s.step}: ${s.detail}`);
-process.exit(steps.every((s) => s.ok) && steps.length === 8 ? 0 : 1);
+process.exit(steps.every((s) => s.ok) && steps.length === 9 ? 0 : 1);

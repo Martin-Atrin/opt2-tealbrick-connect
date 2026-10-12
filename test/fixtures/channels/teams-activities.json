@@ -1,0 +1,77 @@
+{
+  "_source": "Shapes recorded from Bot Framework / Teams activity docs (message in a channel thread, conversationUpdate). Ids are fake.",
+  "message": {
+    "text": "<at>Teal Brick</at> please summarise <at>Grace</at>'s notes‮",
+    "textFormat": "plain",
+    "attachments": [{ "contentType": "text/html", "content": "<div><at id=\"0\">Teal Brick</at> please summarise</div>" }],
+    "type": "message",
+    "timestamp": "2026-10-12T04:00:00.000Z",
+    "localTimestamp": "2026-10-12T11:00:00.000+07:00",
+    "id": "1760241600000",
+    "channelId": "msteams",
+    "serviceUrl": "https://smba.trafficmanager.net/amer/",
+    "from": { "id": "29:1TestUserAbc-_x", "name": "Ada Lovelace", "aadObjectId": "11111111-2222-3333-4444-555555555555" },
+    "conversation": {
+      "isGroup": true,
+      "conversationType": "channel",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "id": "19:testchannel0001@thread.tacv2;messageid=1760241500000"
+    },
+    "recipient": { "id": "28:0f0f0f0f-1111-2222-3333-444444444444", "name": "Teal Brick" },
+    "entities": [
+      { "mentioned": { "id": "28:0f0f0f0f-1111-2222-3333-444444444444", "name": "Teal Brick" }, "text": "<at>Teal Brick</at>", "type": "mention" },
+      { "mentioned": { "id": "29:1GraceUser", "name": "Grace" }, "text": "<at>Grace</at>", "type": "mention" },
+      { "locale": "en-US", "country": "US", "platform": "Web", "timezone": "Asia/Bangkok", "type": "clientInfo" }
+    ],
+    "channelData": {
+      "teamsChannelId": "19:testchannel0001@thread.tacv2",
+      "teamsTeamId": "19:testteam0001@thread.tacv2",
+      "channel": { "id": "19:testchannel0001@thread.tacv2", "name": "General" },
+      "team": { "id": "19:testteam0001@thread.tacv2" },
+      "tenant": { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }
+    },
+    "locale": "en-US"
+  },
+  "conversationUpdate": {
+    "membersAdded": [{ "id": "28:0f0f0f0f-1111-2222-3333-444444444444" }],
+    "type": "conversationUpdate",
+    "timestamp": "2026-10-12T03:59:00.000Z",
+    "id": "f:test-update-0001",
+    "channelId": "msteams",
+    "serviceUrl": "https://smba.trafficmanager.net/amer/",
+    "from": { "id": "29:1TestUserAbc-_x", "aadObjectId": "11111111-2222-3333-4444-555555555555" },
+    "conversation": {
+      "isGroup": true,
+      "conversationType": "channel",
+      "tenantId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "id": "19:testteam0001@thread.tacv2"
+    },
+    "recipient": { "id": "28:0f0f0f0f-1111-2222-3333-444444444444", "name": "Teal Brick" },
+    "channelData": {
+      "team": { "id": "19:testteam0001@thread.tacv2", "name": "Test Team" },
+      "eventType": "teamMemberAdded",
+      "tenant": { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }
+    }
+  },
+  "openid": {
+    "issuer": "https://api.botframework.com",
+    "authorization_endpoint": "https://invalid.botframework.com",
+    "jwks_uri": "https://login.botframework.com/v1/.well-known/keys",
+    "id_token_signing_alg_values_supported": ["RS256"],
+    "token_endpoint_auth_methods_supported": ["private_key_jwt"]
+  },
+  "token": {
+    "token_type": "Bearer",
+    "expires_in": 3599,
+    "ext_expires_in": 3599,
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.fake-access-token-for-tests.signature"
+  },
+  "token_error": {
+    "error": "invalid_client",
+    "error_description": "AADSTS7000215: Invalid client secret provided.",
+    "error_codes": [7000215],
+    "timestamp": "2026-10-12 04:00:00Z",
+    "trace_id": "00000000-0000-0000-0000-000000000000",
+    "correlation_id": "00000000-0000-0000-0000-000000000000"
+  }
+}

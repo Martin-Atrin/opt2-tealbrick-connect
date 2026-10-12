@@ -1,0 +1,87 @@
+{
+  "_comment": "Recorded-shape Bot API getUpdates answers (core.telegram.org/bots/api#getupdates). Ids and names are invented.",
+  "getWebhookInfoSet": {
+    "ok": true,
+    "result": { "url": "https://old.example.com/telegram/hook", "has_custom_certificate": false, "pending_update_count": 0, "max_connections": 40, "ip_address": "203.0.113.7" }
+  },
+  "getWebhookInfoEmpty": { "ok": true, "result": { "url": "", "has_custom_certificate": false, "pending_update_count": 0 } },
+  "deleteWebhook": { "ok": true, "result": true, "description": "Webhook was deleted" },
+  "batch1": {
+    "ok": true,
+    "result": [
+      {
+        "update_id": 727300101,
+        "message": {
+          "message_id": 41,
+          "from": { "id": 5550001, "is_bot": false, "first_name": "Ada", "last_name": "Lovelace", "username": "ada_l", "language_code": "en" },
+          "chat": { "id": 5550001, "first_name": "Ada", "last_name": "Lovelace", "username": "ada_l", "type": "private" },
+          "date": 1760000000,
+          "text": "hello bot\u202e!"
+        }
+      },
+      {
+        "update_id": 727300102,
+        "message": {
+          "message_id": 42,
+          "from": { "id": 7770002, "is_bot": true, "first_name": "Other Bot", "username": "other_bot" },
+          "chat": { "id": -1001234567890, "title": "Team Room", "is_forum": true, "type": "supergroup" },
+          "date": 1760000001,
+          "text": "I am a bot"
+        }
+      },
+      {
+        "update_id": 727300103,
+        "channel_post": {
+          "message_id": 9,
+          "sender_chat": { "id": -1009876543210, "title": "Announcements", "username": "acme_news", "type": "channel" },
+          "chat": { "id": -1009876543210, "title": "Announcements", "username": "acme_news", "type": "channel" },
+          "date": 1760000002,
+          "text": "Release 1.2 is out"
+        }
+      },
+      {
+        "update_id": 727300104,
+        "message": {
+          "message_id": 120,
+          "message_thread_id": 77,
+          "is_topic_message": true,
+          "from": { "id": 5550003, "is_bot": false, "first_name": "Grace" },
+          "chat": { "id": -1001234567890, "title": "Team Room", "is_forum": true, "type": "supergroup" },
+          "date": 1760000003,
+          "photo": [
+            { "file_id": "AgACAgQAAxkBAAIBsmall", "file_unique_id": "AQADs", "file_size": 1200, "width": 90, "height": 60 },
+            { "file_id": "AgACAgQAAxkBAAIBlarge", "file_unique_id": "AQADl", "file_size": 52000, "width": 1280, "height": 853 }
+          ],
+          "caption": "see the chart"
+        }
+      },
+      {
+        "update_id": 727300105,
+        "my_chat_member": {
+          "chat": { "id": -1001234567890, "title": "Team Room", "type": "supergroup" },
+          "from": { "id": 5550003, "is_bot": false, "first_name": "Grace" },
+          "date": 1760000004,
+          "old_chat_member": { "status": "left", "user": { "id": 999000111, "is_bot": true, "first_name": "Teal" } },
+          "new_chat_member": { "status": "member", "user": { "id": 999000111, "is_bot": true, "first_name": "Teal" } }
+        }
+      }
+    ]
+  },
+  "batch2": {
+    "ok": true,
+    "result": [
+      {
+        "update_id": 727300106,
+        "message": {
+          "message_id": 43,
+          "from": { "id": 5550001, "is_bot": false, "first_name": "Ada", "last_name": "Lovelace" },
+          "chat": { "id": 5550001, "first_name": "Ada", "last_name": "Lovelace", "type": "private" },
+          "date": 1760000010,
+          "document": { "file_name": "report.pdf", "mime_type": "application/pdf", "file_id": "BQACAgQAAxkBAAIBdoc", "file_unique_id": "AgADd", "file_size": 88000 }
+        }
+      }
+    ]
+  },
+  "conflict": { "ok": false, "error_code": 409, "description": "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running" },
+  "unauthorized": { "ok": false, "error_code": 401, "description": "Unauthorized" }
+}

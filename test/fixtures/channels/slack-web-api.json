@@ -1,0 +1,49 @@
+{
+  "_source": "Shapes recorded from Slack Web API docs (auth.test, conversations.list, chat.postMessage, conversations.open, apps.connections.open). Ids are fake.",
+  "auth.test": {
+    "ok": true,
+    "url": "https://acme-test.slack.com/",
+    "team": "Acme Test",
+    "user": "tealbrick",
+    "team_id": "T0TESTTEAM",
+    "user_id": "U0BOTUSER1",
+    "bot_id": "B0BOTAPP01",
+    "is_enterprise_install": false
+  },
+  "conversations.list.page1": {
+    "ok": true,
+    "channels": [
+      { "id": "C0GENERAL1", "name": "general", "is_channel": true, "is_group": false, "is_im": false, "is_mpim": false, "is_private": false, "is_archived": false, "is_member": true, "num_members": 12 },
+      { "id": "C0RANDOM01", "name": "random", "is_channel": true, "is_group": false, "is_im": false, "is_mpim": false, "is_private": false, "is_archived": false, "is_member": false, "num_members": 9 },
+      { "id": "C0OLDSTUFF", "name": "old-stuff", "is_channel": true, "is_group": false, "is_im": false, "is_mpim": false, "is_private": false, "is_archived": true, "is_member": true, "num_members": 3 }
+    ],
+    "response_metadata": { "next_cursor": "dGVhbTpDMDYxRkE1UEI=" }
+  },
+  "conversations.list.page2": {
+    "ok": true,
+    "channels": [
+      { "id": "G0PRIVATE1", "name": "leads‮", "is_channel": false, "is_group": true, "is_im": false, "is_mpim": false, "is_private": true, "is_archived": false, "is_member": true, "num_members": 4 }
+    ],
+    "response_metadata": { "next_cursor": "" }
+  },
+  "chat.postMessage": {
+    "ok": true,
+    "channel": "C0GENERAL1",
+    "ts": "1700000100.000200",
+    "message": { "type": "message", "subtype": "bot_message", "text": "hello", "ts": "1700000100.000200", "bot_id": "B0BOTAPP01", "user": "U0BOTUSER1" }
+  },
+  "conversations.open": {
+    "ok": true,
+    "channel": { "id": "D0DIRECT01" }
+  },
+  "apps.connections.open": {
+    "ok": true,
+    "url": "wss://wss-primary.slack.com/link/?ticket=00000000-test-ticket&app_id=A0TESTAPP1"
+  },
+  "error.missing_scope": {
+    "ok": false,
+    "error": "missing_scope",
+    "needed": "reactions:write",
+    "provided": "chat:write,channels:read"
+  }
+}
