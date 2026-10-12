@@ -4,7 +4,7 @@
  */
 import { useAgents, useHolds } from "@opt2-tealbrick/miniapp-sdk/client";
 import { Button, Tag } from "@opt2-tealbrick/ui";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Notice } from "../components.tsx";
 import { errorText, useLoad } from "../hooks.ts";
@@ -15,10 +15,16 @@ type KeyRow = { name: string; required: boolean; present: boolean; source: strin
 
 const when = (ms: number) => new Date(ms).toLocaleString();
 
-export function Holds() {
+/** `focusId`: the hold an owner link names (`/holds/<id>`, C105b); its card is marked and scrolled into view. */
+export function Holds({ focusId }: { focusId?: string | undefined }) {
   const { holds, loading, decide } = useHolds({ status: "held" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const focused = useRef<HTMLLIElement | null>(null);
+  const focusedFound = !!focusId && holds.some((h) => h.id === focusId);
+  useEffect(() => {
+    if (focusedFound) focused.current?.scrollIntoView?.({ block: "center" });
+  }, [focusedFound]);
   if (loading) return <p>Loading holds.</p>;
   const act = async (id: string, decision: "approve" | "deny") => {
     setBusy(id);
@@ -36,10 +42,11 @@ export function Holds() {
       <h2 id="holds-title">Holds</h2>
       <p>Calls that wait for your approval. Each approval allows that one call only.</p>
       {error ? <Notice tone="error">{error}</Notice> : null}
+      {focusId && !focusedFound ? <Notice tone="info">The call from this link no longer waits for approval. It was already decided or it expired.</Notice> : null}
       {holds.length === 0 ? <p>No calls wait for your approval.</p> : null}
       <ul className="list">
         {holds.map((h) => (
-          <li key={h.id} className="card">
+          <li key={h.id} className="card" ref={h.id === focusId ? focused : undefined} aria-current={h.id === focusId ? "true" : undefined} data-focused={h.id === focusId ? "true" : undefined}>
             <p>
               <strong>{h.caller.name}</strong> {h.summary} <Tag tone="action">{h.op}</Tag>
             </p>

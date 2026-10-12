@@ -1,29 +1,16 @@
 import { useEffect, useState } from "react";
 
-/** Connect pages first, then the SDK standard pages (ui STANDARD_PAGES ids). */
-export const ROUTES = ["services", "accounts", "buzz", "chat", "senders", "holds", "receipts", "agents", "keys", "backups"] as const;
-export type Route = (typeof ROUTES)[number];
+import { hrefOf, parseWhere, ROUTES, type Route, type Where } from "./route-parse.ts";
 
-/** App base path (manifest ui paths live under `/a/<product>/`, see index.html `<base>`). */
-const BASE = "/a/connect/";
+export { hrefOf, ROUTES, type Route };
 
-/** `/` is Services (ui.launchPath), `/configure` is Accounts (ui.configurePath); other pages are `/configure#<id>`. */
-export function hrefOf(route: Route): string {
-  if (route === "services") return BASE;
-  return route === "accounts" ? `${BASE}configure` : `${BASE}configure#${route}`;
-}
+const here = (): Where => parseWhere(location.pathname, location.hash);
 
-function current(): Route {
-  const path = location.pathname.slice(BASE.length - 1).replace(/\/+$/u, "") || "/";
-  if (path !== "/configure") return "services";
-  const hash = location.hash.slice(1);
-  return (ROUTES as readonly string[]).includes(hash) ? (hash as Route) : "accounts";
-}
-
-export function useRoute(): [Route, (route: Route) => void] {
-  const [route, setRoute] = useState<Route>(current);
+/** [page, go, where]: `where.holdId` is set when the address is `/holds/<id>` (an app's owner link). */
+export function useRoute(): [Route, (route: Route) => void, Where] {
+  const [where, setWhere] = useState<Where>(here);
   useEffect(() => {
-    const sync = () => setRoute(current());
+    const sync = () => setWhere(here());
     window.addEventListener("popstate", sync);
     window.addEventListener("hashchange", sync);
     return () => {
@@ -33,8 +20,8 @@ export function useRoute(): [Route, (route: Route) => void] {
   }, []);
   const go = (next: Route) => {
     history.pushState(null, "", hrefOf(next));
-    setRoute(next);
+    setWhere({ route: next });
     window.scrollTo(0, 0);
   };
-  return [route, go];
+  return [where.route, go, where];
 }

@@ -65,6 +65,10 @@ test("built image layout serves ui.launchPath, ui.configurePath and assets to a 
       assert.equal(res.status, 200, `${path} → ${res.status}`);
       assert.match(await res.text(), /<div id="root">/u, path);
     }
+    // C105b: an app's owner link `/holds/<id>` is served by the same page (the router picks the Holds page from the address)
+    const holdLink = await get("/holds/hld_01JZ0000000000000000000000");
+    assert.equal(holdLink.status, 200, `/holds/<id> → ${holdLink.status}`);
+    assert.match(await holdLink.text(), /<div id="root">/u);
     for (const asset of ["/main.js", "/ops.json", "/app.css"]) assert.equal((await get(asset)).status, 200, asset);
     assert.equal((await fetch(`${origin}${base}${manifest.ui.launchPath}`)).status, 401, "no session → sign-in page");
   } finally {

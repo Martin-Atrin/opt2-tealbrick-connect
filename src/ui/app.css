@@ -274,6 +274,10 @@ input[type="search"] {
   flex-direction: column;
   gap: 0.6rem;
 }
+.card[data-focused="true"] {
+  border-color: var(--teal-700);
+  box-shadow: 0 0 0 2px var(--teal-100);
+}
 .card-head {
   display: flex;
   flex-wrap: wrap;

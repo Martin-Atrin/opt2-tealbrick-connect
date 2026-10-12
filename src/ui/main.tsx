@@ -15,7 +15,7 @@ import { ROUTES, type Route, useRoute } from "./router.ts";
 
 const PAGES = [{ id: "services", label: "Services" }, { id: "accounts", label: "Accounts" }, { id: "buzz", label: "Buzz" }, { id: "chat", label: "Chat bots" }, { id: "senders", label: "Senders" }, ...STANDARD_PAGES];
 
-function Page({ route, go }: { route: Route; go(route: Route): void }) {
+function Page({ route, go, holdId }: { route: Route; go(route: Route): void; holdId?: string | undefined }) {
   switch (route) {
     case "services":
       return <Services onOpenAccounts={() => go("accounts")} />;
@@ -28,7 +28,7 @@ function Page({ route, go }: { route: Route; go(route: Route): void }) {
     case "senders":
       return <Senders />;
     case "holds":
-      return <Holds />;
+      return <Holds focusId={holdId} />;
     case "receipts":
       return <Receipts />;
     case "agents":
@@ -41,7 +41,7 @@ function Page({ route, go }: { route: Route; go(route: Route): void }) {
 }
 
 function App() {
-  const [route, go] = useRoute();
+  const [route, go, where] = useRoute();
   const session = useSession();
   return (
     <AppShell
@@ -54,7 +54,7 @@ function App() {
       }}
       banner={session.status === "signed_out" ? <Notice tone="error">Your session ended. Open Connect again from Teal Brick Portal.</Notice> : undefined}
     >
-      <Page route={route} go={go} />
+      <Page route={route} go={go} holdId={where.holdId} />
     </AppShell>
   );
 }
