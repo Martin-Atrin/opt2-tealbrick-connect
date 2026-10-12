@@ -4,8 +4,8 @@
   "id": "connect",
   "name": "Connect",
   "summary": "Connect your agents to the services you use: Gmail and 1,000+ apps through Composio, self-hosted apps, MCP servers and team chat.",
-  "description": "Connect holds all outside connectivity for your agents.\n\n- **Services:** search a service, press Connect, sign in. Several accounts per service (for example two Gmail inboxes).\n- **Access per account and agent:** READ, READ/UPDATE (includes create and send) or READ/UPDATE/DELETE.\n- **As me or as itself:** an agent can use your account, or its own identity (for example its own Buzz identity).\n- **Channels:** Buzz identities for all your agents in one step (or on an agent's first Buzz use), on one or more Buzz relays.\n- **Senders:** pick the identity your apps send from (for example Operator Inbox alerts), per channel.\n\nOutward and destructive actions follow your agent policy: held for your approval or recorded as receipts.",
-  "version": "0.4.0",
+  "description": "Connect holds all outside connectivity for your agents.\n\n- **Services:** search a service, press Connect, sign in. Several accounts per service (for example two Gmail inboxes).\n- **Access per account and agent:** READ, READ/UPDATE (includes create and send) or READ/UPDATE/DELETE.\n- **As me or as itself:** an agent can use your account, or its own identity (for example its own Buzz identity).\n- **Channels:** each agent connected to Connect gets its own Buzz identity at once, on one or more Buzz relays.\n- **Senders:** pick the identity your apps send from (for example Operator Inbox alerts), per channel.\n\nBy default, deletions, payments, first messages to a new person and profile changes wait for your approval. Ordinary messages and posts go out at once and leave a receipt, unless you turn on approval for every message in the agent policy.",
+  "version": "0.5.0",
   "sdkMajor": 1,
   "publisher": {
     "name": "Teal Brick",
@@ -184,7 +184,7 @@
     {
       "id": "buzz_identity",
       "title": "My Buzz identity",
-      "description": "Your own Buzz (Nostr) identity: npub and the relays you use (the same identity on every relay). Created on your first Buzz op if you have none. The owner adds this npub to Buzz channels.",
+      "description": "Your own Buzz (Nostr) identity: npub and the relays you use (the same identity on every relay). Connect creates it when you are connected to Connect. The owner adds this npub to Buzz channels.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -474,7 +474,7 @@
     {
       "id": "buzz_post",
       "title": "Post to a Buzz channel",
-      "description": "Post a message as yourself to a Buzz channel you are a member of, on all your relays. Optionally reply in a thread. The result lists each relay as ok or failed. A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity).",
+      "description": "Post a message as yourself to a Buzz channel you are a member of, on all your relays. Optionally reply in a thread. The result lists each relay as ok or failed. A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity). No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -559,6 +559,7 @@
         "create"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "idempotency": "required",
       "receipt": true,
       "audience": "agent"
@@ -661,7 +662,7 @@
     {
       "id": "buzz_dm",
       "title": "Direct message a known person",
-      "description": "Send a Buzz direct message to a person you already wrote to (after buzz_dm_first ran). For a new person use buzz_dm_first. A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity).",
+      "description": "Send a Buzz direct message to a person you already wrote to (after buzz_dm_first ran). For a new person use buzz_dm_first. A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity). No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -748,6 +749,7 @@
         "create"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "idempotency": "required",
       "receipt": true,
       "audience": "agent"
@@ -822,7 +824,7 @@
     {
       "id": "buzz_react",
       "title": "React to a Buzz message",
-      "description": "Add a reaction (one emoji) to a message in a Buzz channel you are a member of.",
+      "description": "Add a reaction (one emoji) to a message in a Buzz channel you are a member of. No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -904,6 +906,7 @@
         "create"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "idempotency": "required",
       "receipt": true,
       "audience": "agent"
@@ -911,7 +914,7 @@
     {
       "id": "buzz_edit",
       "title": "Edit my Buzz message",
-      "description": "Replace the text of a message you posted in Buzz. Edits do not notify anyone.",
+      "description": "Replace the text of a message you posted in Buzz. Edits do not notify anyone. No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -993,6 +996,7 @@
         "update"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "idempotency": "supported",
       "receipt": true,
       "audience": "agent"
@@ -1085,7 +1089,7 @@
     {
       "id": "buzz_schedule",
       "title": "Schedule a Buzz post",
-      "description": "Post a message to a Buzz channel at a later time (UTC ISO 8601, up to 30 days ahead).",
+      "description": "Post a message to a Buzz channel at a later time (UTC ISO 8601, up to 30 days ahead). No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1139,6 +1143,7 @@
         "create"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "idempotency": "required",
       "receipt": true,
       "audience": "agent"
@@ -1270,7 +1275,6 @@
         "read"
       ],
       "effect": "read",
-      "scopeType": "account",
       "idempotency": "none",
       "receipt": false,
       "audience": "agent"
@@ -1316,7 +1320,7 @@
     {
       "id": "channel_send",
       "title": "Post to a chat channel",
-      "description": "Post a message as your bot to a channel or group conversation (optionally in a thread). A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity).",
+      "description": "Post a message as your bot to a channel or group conversation (optionally in a thread). A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity). No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1367,6 +1371,7 @@
         "create"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "scopeType": "account",
       "idempotency": "required",
       "receipt": true,
@@ -1375,7 +1380,7 @@
     {
       "id": "channel_reply",
       "title": "Reply to an inbound message",
-      "description": "Reply to one inbox message (by account + seq): in its thread where the service has threads. A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity).",
+      "description": "Reply to one inbox message (by account + seq): in its thread where the service has threads. A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity). No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1420,6 +1425,7 @@
         "create"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "scopeType": "account",
       "idempotency": "required",
       "receipt": true,
@@ -1483,7 +1489,7 @@
     {
       "id": "channel_dm",
       "title": "Direct message a known person",
-      "description": "Direct message a person you already wrote to (or who wrote to your bot). For a new person use channel_dm_first. A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity).",
+      "description": "Direct message a person you already wrote to (or who wrote to your bot). For a new person use channel_dm_first. A companion app caller sends from the workspace sender the owner picked in Connect → Senders (else no_sender_identity). No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1529,6 +1535,7 @@
         "create"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "scopeType": "account",
       "idempotency": "required",
       "receipt": true,
@@ -1537,7 +1544,7 @@
     {
       "id": "channel_edit",
       "title": "Edit my chat message",
-      "description": "Replace the text of a message your bot sent through Connect.",
+      "description": "Replace the text of a message your bot sent through Connect. No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1585,6 +1592,7 @@
         "update"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "scopeType": "account",
       "idempotency": "supported",
       "receipt": true,
@@ -1645,7 +1653,7 @@
     {
       "id": "channel_react",
       "title": "React to a chat message",
-      "description": "Add a reaction to a message (emoji name or character, depending on the service).",
+      "description": "Add a reaction to a message (emoji name or character, depending on the service). No owner approval by default; if the owner turned on approval for every message, the call is held: poll connect__tb_hold_status and repeat the same call after approval.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1693,6 +1701,7 @@
         "create"
       ],
       "effect": "outward",
+      "holdFamily": "outward",
       "scopeType": "account",
       "idempotency": "required",
       "receipt": true,
@@ -2096,7 +2105,7 @@
     {
       "id": "buzz_profile_publish",
       "title": "Publish Buzz profiles",
-      "description": "Publish the agents' names as Buzz profiles on all their relays.",
+      "description": "Publish the agents' names as Buzz profiles on all their relays. This changes the agents' public identity (hold family identity).",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -2113,6 +2122,7 @@
         "create"
       ],
       "effect": "outward",
+      "holdFamily": "identity",
       "idempotency": "required",
       "receipt": true,
       "audience": "person"

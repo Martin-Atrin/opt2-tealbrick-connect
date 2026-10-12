@@ -133,7 +133,8 @@ test("edit/delete only own messages; react passes through", async () => {
 
 test("manifest: channel ops are account-scoped; delete ops are destructive + held; DM first is first_contact; Teams webhook route", () => {
   const ops = Object.fromEntries(manifest.operations.map((o) => [o.id, o]));
-  for (const id of ["channel_inbox", "channel_send", "channel_reply", "channel_dm_first", "channel_dm", "channel_edit", "channel_delete", "channel_react", "channel_conversations"]) assert.equal(ops[id]?.scopeType, "account", id);
+  assert.equal(ops.channel_inbox?.scopeType, undefined); // F35: the handler filters by ctx.scope (see channel-inbox-scope test)
+  for (const id of ["channel_send", "channel_reply", "channel_dm_first", "channel_dm", "channel_edit", "channel_delete", "channel_react", "channel_conversations"]) assert.equal(ops[id]?.scopeType, "account", id);
   assert.equal(ops.channel_dm_first?.holdFamily, "first_contact");
   assert.equal(ops.channel_delete?.holdFamily, "destructive");
   assert.equal(ops.buzz_delete?.holdFamily, "destructive");

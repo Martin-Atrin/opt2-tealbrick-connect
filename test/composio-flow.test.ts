@@ -183,6 +183,11 @@ test("catalog search offers only connected services; resolve returns the class",
   assert.ok(hits[0]?.inputSchema.properties && "connect_account" in (hits[0].inputSchema.properties as object));
   assert.deepEqual(await dyn.resolve("gmail_delete_message", hookCtx), { tool: "gmail_delete_message", crud: ["update", "delete"], effect: "destructive", holdFamily: "destructive" });
   assert.equal(await dyn.resolve("nope", hookCtx), null);
+  // C107: a send resolves WITH the "outward" family (the READ-UPDATE tier is the consent; not held by default). Never
+  // first_contact: resolve sees no recipient and Connect keeps no third-party correspondence history.
+  assert.deepEqual(await dyn.resolve("gmail_send_email", hookCtx), { tool: "gmail_send_email", crud: ["create", "update"], effect: "outward", holdFamily: "outward" });
+  assert.equal(hits[0]?.holdFamily, "outward");
+  assert.deepEqual(await dyn.resolve("gmail_fetch_emails", hookCtx), { tool: "gmail_fetch_emails", crud: ["read"], effect: "read" });
 });
 
 test("services search reports a missing Composio key instead of failing", async () => {

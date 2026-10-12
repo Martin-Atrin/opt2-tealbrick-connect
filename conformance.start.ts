@@ -1,8 +1,8 @@
 // Conformance harness (CONFORMANCE §2, app target): `tb-conformance app --start conformance.start.ts` boots Connect with
 // the env the suite gives it (fake bridge, enrolment code, TB_KEK, data dir) and drives it like the bridge does.
 //
-// Known-good fixture for the one agent receipt op (`buzz_post`, see conformance.inputs.json): the agent's Buzz identity is
-// created on its first Buzz op (F20, same as production), and the relay is an in-process fake test relay (no network, no
+// Known-good fixture for the agent receipt ops (`buzz_post`, see conformance.inputs.json): the agent's Buzz identity is
+// created at tether or on its first Buzz op (F20, same as production), and the relay is an in-process fake test relay (no network, no
 // real people — C22).
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -10,10 +10,13 @@ import { join } from "node:path";
 import { defineApp, startApp, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 
+import { AccountStore } from "./src/accounts.ts";
 import { createConnectApp } from "./src/app.ts";
 import { BuzzIdentities, WORKSPACE_SENDER } from "./src/channels/buzz/identity.ts";
 import { verifyEvent } from "./src/channels/buzz/nostr.ts";
 import { SenderStore } from "./src/senders.ts";
+import { classifyComposioTool, loadPolicies } from "./src/sources/composio/policy.ts";
+import { entrySchema, ToolRegistry, toolName } from "./src/tools.ts";
 
 const manifest = JSON.parse(readFileSync(join(import.meta.dirname, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const TEST_RELAY = "wss://relay.conformance.example";
@@ -54,6 +57,25 @@ export default async function start(env: Record<string, string>): Promise<{ url:
       const buzz = new BuzzIdentities({ db: ctx.db, secrets: ctx.secrets, relayUrls: TEST_RELAY, allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP] });
       await buzz.ensure({ id: WORKSPACE_SENDER, name: "Conformance workspace" });
       new SenderStore(ctx.db).set("buzz", null, "Conformance workspace");
+      // C107 fixture (owner state): one connected Gmail account with its tools classified by the real Composio policy,
+      // so the suite resolves real dynamic entries (A11/B16.resolve_family: a send resolves with the "outward" family).
+      const accounts = new AccountStore(ctx.db);
+      if (accounts.list({ service: "gmail" }).length === 0) {
+        accounts.create({ service: "gmail", source: "composio", kind: "as_me", label: "Conformance inbox", externalRef: "ca_conformance", status: "connected" });
+        const gmail = loadPolicies().get("gmail");
+        new ToolRegistry(ctx.db).replaceService(
+          "composio",
+          "gmail",
+          ["GMAIL_SEND_EMAIL", "GMAIL_FETCH_EMAILS", "GMAIL_DELETE_MESSAGE"].map((slug) => ({
+            name: toolName(slug),
+            upstream: slug,
+            title: slug,
+            description: slug,
+            inputSchema: entrySchema({ type: "object", properties: {} }),
+            ...classifyComposioTool(slug, gmail),
+          })),
+        );
+      }
       await definition.onStart?.(ctx);
     },
   });

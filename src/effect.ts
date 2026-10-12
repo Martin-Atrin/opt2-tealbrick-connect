@@ -33,12 +33,16 @@ export function effectRank(effect: Effect): number {
 /**
  * Build a tool class from three facts. `write` = changes state, `outward` = reaches a third party (sends, posts,
  * notifies people), `destructive` = deletes or irreversibly overwrites. Result obeys M-OP-2/3/4:
- * read ⇔ ["read"]; destructive ⇒ delete ∈ crud and holdFamily "destructive"; outward has no family by default.
+ * read ⇔ ["read"]; destructive ⇒ delete ∈ crud and holdFamily "destructive"; outward ⇒ holdFamily "outward" (C107: a
+ * `resolve` answer with outward or money effect always carries a family; "outward" is not held by default, the owner can
+ * turn it on). Dynamic tools never resolve as `first_contact`: `resolve` sees only the tool name, not the recipient, and
+ * Connect keeps no correspondence history for third-party services, so it cannot prove a recipient is new. Connect's own
+ * channels have explicit first-contact ops (buzz_dm_first, channel_dm_first).
  */
 export function classify(facts: { write: boolean; outward: boolean; destructive: boolean; money?: boolean }): ToolClass {
   if (facts.money) return { crud: ["create", "update", "delete"], effect: "money", holdFamily: "money" };
   if (facts.destructive) return { crud: ["update", "delete"], effect: "destructive", holdFamily: "destructive" };
-  if (facts.outward) return { crud: ["create", "update"], effect: "outward" };
+  if (facts.outward) return { crud: ["create", "update"], effect: "outward", holdFamily: "outward" };
   if (facts.write) return { crud: ["create", "update"], effect: "write" };
   return { crud: ["read"], effect: "read" };
 }

@@ -216,6 +216,25 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     extras(ctx).workspace ?? ctx.grant?.claims.ws ?? fail("workspace_unknown", "The workspace id is not known yet. Wait for the first workspace sync.", 503);
   const agentsOf = (db: Db): { id: string; name: string }[] =>
     db.prepare("SELECT id, name FROM connect_agents ORDER BY name, id").all().map((r) => ({ id: String(r.id), name: String(r.name) }));
+  /**
+   * F20 (C106): Buzz identity on tether. An agent that reaches Connect's slice (an edge to Connect) gets its Buzz key at
+   * once: no owner step, no first Buzz call. Key only (no relay traffic, no profile publish). Runs from agentAdded and as
+   * an onStart sweep; event contexts carry no app secrets, so before onStart built the services the sweep does the work.
+   * Uses the same per-agent serialized ensure() as the Buzz ops (which still self-heal if this failed).
+   */
+  const tetherBuzz = async (db: Db, log: Logger): Promise<void> => {
+    const built = cache && cache.db === db ? cache.services : null;
+    if (!built) return;
+    for (const agent of agentsOf(db)) {
+      if (built.buzz.get(agent.id)) continue;
+      try {
+        await built.buzz.ensure(agent);
+      } catch (e) {
+        // L3: not silent. The agent's first Buzz op retries the same ensure().
+        log.error("buzz identity on tether failed", { agent: agent.id, code: (e as { code?: string }).code ?? "error" });
+      }
+    }
+  };
 
   /** Accounts of one service this caller may use for a tool with the given CRUD class. */
   const usableAccounts = async (ctx: OpContext, s: Services, service: string, crud: readonly CrudAction[]): Promise<Account[]> => {
@@ -248,7 +267,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     ctx.caller.type === "agent"
       ? ctx.caller.id
       : fail("agent_only", "This operation serves agents only. Apps send from the workspace sender with buzz_post, buzz_dm_first, buzz_dm, channel_send, channel_reply, channel_dm_first or channel_dm.", 403);
-  /** F20: the calling agent's Buzz key, created on first use (no owner step, no call order to know). */
+  /** F20: the calling agent's Buzz key (created at tether by tetherBuzz; ensure() here only self-heals a failed tether). */
   const buzzAgent = async (ctx: OpContext, s: Services): Promise<string> => {
     const id = agentOnly(ctx);
     const row = ctx.db.prepare("SELECT name FROM connect_agents WHERE id = ?").get(id);
@@ -543,7 +562,9 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
 
     // ── chat channels (agent; the send ops also serve companion apps through the workspace sender, C86) ──
     channel_inbox: {
-      scope: (input) => str(asInput(input).account) ?? null,
+      // No manifest scopeType (F35): an agent with no chat bot yet gets an empty inbox, not scope_denied on every poll.
+      // This filter is the ONLY scope guard: own bots (ownerAgent = caller) that the caller may read (ctx.scope), and
+      // the `account` input can only narrow that set (test/channel-inbox-scope.test.ts).
       run: async (input, ctx) =>
         guard(async () => {
           const i = asInput(input);
@@ -1073,6 +1094,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     onStart: async (ctx) => {
       const s = services(ctx);
       s.channels.startAll();
+      await tetherBuzz(ctx.db, ctx.log);
       const tick = async () => {
         s.channels.purge();
         await runDueBuzzPosts(ctx.db, s.relay, ctx.log);
@@ -1088,6 +1110,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         ctx.db
           .prepare("INSERT INTO connect_agents (id, name, updated_at) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at")
           .run(agent.id, agent.name.slice(0, 80), Date.now());
+        await tetherBuzz(ctx.db, ctx.log);
       },
       async agentRemoved(agent, ctx) {
         ctx.db.prepare("DELETE FROM connect_agents WHERE id = ?").run(agent.id);

@@ -7,7 +7,7 @@ import { classifyComposioTool, loadPolicies } from "../src/sources/composio/poli
 test("classify obeys M-OP-2/3/4", () => {
   assert.deepEqual(classify({ write: false, outward: false, destructive: false }), { crud: ["read"], effect: "read" });
   assert.deepEqual(classify({ write: true, outward: false, destructive: false }), { crud: ["create", "update"], effect: "write" });
-  assert.deepEqual(classify({ write: true, outward: true, destructive: false }), { crud: ["create", "update"], effect: "outward" });
+  assert.deepEqual(classify({ write: true, outward: true, destructive: false }), { crud: ["create", "update"], effect: "outward", holdFamily: "outward" });
   assert.deepEqual(classify({ write: true, outward: true, destructive: true }), { crud: ["update", "delete"], effect: "destructive", holdFamily: "destructive" });
   assert.deepEqual(classify({ write: true, outward: false, destructive: false, money: true }).holdFamily, "money");
 });
@@ -80,4 +80,16 @@ test("SEC-02: Composio without a policy fails closed; a policy never downgrades 
   assert.equal(classifyMcpTool("charge_card", { readOnlyHint: true }).effect, "money");
   assert.equal(classifyMcpTool("frobnicate", undefined).effect, "outward");
   assert.equal(classifyMcpTool("frobnicate", { readOnlyHint: true }).effect, "read");
+});
+
+test("C107: every outward or money class carries a hold family (resolve answers never lack one)", () => {
+  const names = ["GMAIL_SEND_EMAIL", "SLACK_SEND_MESSAGE", "GITHUB_MERGE_PULL_REQUEST", "ACME_FROBNICATE_WIDGET", "STRIPE_CREATE_REFUND", "NOTION_DELETE_PAGE", "NOTION_UPDATE_PAGE", "NOTION_GET_PAGE"];
+  for (const name of names) {
+    const cls = inferFromName(name);
+    if (cls.effect === "outward") assert.equal(cls.holdFamily, "outward", name);
+    if (cls.effect === "money") assert.equal(cls.holdFamily, "money", name);
+    if (cls.effect === "read" || cls.effect === "write") assert.equal(cls.holdFamily, undefined, name);
+  }
+  assert.equal(classifyMcpTool("lookup", { readOnlyHint: false, openWorldHint: true }).holdFamily, "outward");
+  assert.equal(classifyMcpTool("send_invoice_payment", undefined).holdFamily, "money");
 });

@@ -19,16 +19,18 @@ test("npub and hex parsing; nsec and junk refused", () => {
   assert.equal(parsePubkey(npubEncode(hex)), hex);
   assert.equal(parsePubkey(hex.toUpperCase()), hex);
   assert.equal(parsePubkey(`nsec1${npubEncode(hex).slice(5)}`), null);
-  assert.equal(parsePubkey(`${npubEncode(hex).slice(0, -1)}q`), null);
+  // Broken checksum: change the last character to a different bech32 one (it can already be "q": 1 in 32 keys).
+  const npub = npubEncode(hex);
+  assert.equal(parsePubkey(`${npub.slice(0, -1)}${npub.endsWith("q") ? "p" : "q"}`), null);
 });
 
-test("manifest: buzz_dm_first is outward + first_contact; buzz_dm is outward without a hold family", () => {
+test("manifest: buzz_dm_first is outward + first_contact; buzz_dm is outward + outward (C107)", () => {
   const first = manifest.operations.find((o) => o.id === "buzz_dm_first");
   const later = manifest.operations.find((o) => o.id === "buzz_dm");
   assert.equal(first?.effect, "outward");
   assert.equal(first?.holdFamily, "first_contact");
   assert.equal(later?.effect, "outward");
-  assert.equal(later?.holdFamily, undefined);
+  assert.equal(later?.holdFamily, "outward");
 });
 
 test("first DM opens the conversation (kind 41010) and posts (kind 9); later DMs need that first contact", async () => {
