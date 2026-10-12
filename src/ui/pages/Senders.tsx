@@ -37,7 +37,7 @@ export function Senders() {
       <h2>Senders</h2>
       <p className="lede">
         Apps such as Operator Inbox send messages from the identity you pick here, one per channel. Agents always send from their own identity. With no
-        sender set, apps cannot send on that channel. The first message to a new person still waits for your approval.
+        sender set, apps cannot send on that channel. The first message to a new person still waits for your approval. All apps share one sender per channel: after you approve a first message to a person, every app can write to that person.
       </p>
       {message ? <Notice tone={message.error ? "error" : "info"}>{message.text}</Notice> : null}
       {list.error ? <Notice tone="error">{list.error}</Notice> : null}

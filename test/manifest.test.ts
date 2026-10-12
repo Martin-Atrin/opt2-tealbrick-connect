@@ -32,5 +32,7 @@ test("the tools op is the dynamic search family with the full ceiling; tier scop
     ["read", ["read"]],
     ["read_update", ["read", "create", "update"]],
     ["read_update_delete", ["read", "create", "update", "delete"]],
+    // C86/Q-C2: only the shared default on `sender:*` grants it (companion apps); Connect's access UI never offers it.
+    ["apps_only", ["read", "create", "update"]],
   ]);
 });

@@ -994,8 +994,9 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           if (account?.source !== "channel" || account.service !== channel) fail("account_unknown", `No ${channel} bot with that id is connected in Connect.`, 404);
           if (account?.status !== "connected") fail("channel_account_not_connected", "This bot is not connected. Connect it again first.", 409);
           s.senders.set(channel as ChannelServiceId, id, (account as Account).label);
-          // Companion apps reach it through the shared `sender:<service>` scope instance (manifest defaultGrants shared).
-          await extras(ctx).scopes.instances.create(PRODUCT_SCOPE, senderScopeId(channel as ChannelServiceId), `Workspace sender for apps only (${channel})`, { shared: true });
+          // Companion apps reach it through the shared `sender:<service>` scope instance (manifest defaultGrants shared →
+          // access `apps_only`, left out of the canvas summary; agents are refused in the handler: sender_reserved_for_apps).
+          await extras(ctx).scopes.instances.create(PRODUCT_SCOPE, senderScopeId(channel as ChannelServiceId), `Workspace sender (${channel}) — for apps only, not usable by agents`, { shared: true });
         }
         return { sender: senderView(s, channel as SenderChannel) } as unknown as Json;
       });
@@ -1011,7 +1012,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           ctx.db.prepare("DELETE FROM connect_buzz_contacts WHERE agent = ?").run(WORKSPACE_SENDER);
           ctx.db.prepare("DELETE FROM connect_buzz_sent WHERE agent = ?").run(WORKSPACE_SENDER);
         } else {
-          await extras(ctx).scopes.instances.create(PRODUCT_SCOPE, senderScopeId(channel as ChannelServiceId), `Workspace sender for apps only (${channel}, not set)`, { shared: false });
+          await extras(ctx).scopes.instances.create(PRODUCT_SCOPE, senderScopeId(channel as ChannelServiceId), `Workspace sender (${channel}, not set) — for apps only, not usable by agents`, { shared: false });
         }
         return { cleared };
       });

@@ -92,7 +92,10 @@ test("manifest 0.4.0: identities_list is agent read-only without receipt; sender
   assert.deepEqual([list?.audience, list?.effect, list?.idempotency, list?.receipt, list?.scopeType], ["agent", "read", "none", false, undefined]);
   assert.deepEqual(list?.crud, ["read"]);
   for (const id of ["sender_identities_list", "sender_identity_set", "sender_identity_clear"]) assert.equal(ops[id]?.audience, "person", id);
-  assert.deepEqual(manifest.scopes?.[0]?.defaultGrants, [{ kind: "shared", access: "read_update" }]);
+  assert.deepEqual(manifest.scopes?.[0]?.defaultGrants, [{ kind: "shared", access: "apps_only" }]);
+  // A2A-12: the apps-only level is labelled as such and the canvas summary counts only levels agents can use.
+  assert.match(manifest.scopes?.[0]?.access.find((a) => a.id === "apps_only")?.label ?? "", /APPS ONLY \(not usable by agents\)/u);
+  assert.doesNotMatch(manifest.scopes?.[0]?.summaryTemplate ?? "", /\{count\}|apps_only/u);
 });
 
 test("C86 Buzz: an app caller with no workspace sender gets no_sender_identity (409, not retryable, names the settings page)", async () => {
@@ -157,7 +160,7 @@ test("C86 chat: apps send from the owner-picked bot via the shared sender:<servi
   const before = scopeCreates.length;
   const set = (await handlerOf(s.app, "sender_identity_set")({ channel: "slack", account: a.account.id }, s.person)) as { sender: { identity: string } };
   assert.equal(set.sender.identity, "slack:U0BOTA");
-  assert.deepEqual(scopeCreates.slice(before), [{ type: "account", id: "sender:slack", label: "Workspace sender for apps only (slack)", shared: true }]);
+  assert.deepEqual(scopeCreates.slice(before), [{ type: "account", id: "sender:slack", label: "Workspace sender (slack) — for apps only, not usable by agents", shared: true }]);
   // The SDK checks the app's scope on sender:slack (shared default), whether the app names the service or an account id.
   const spec = s.app.handlers.channel_dm as { scope: (input: Json, caller: Caller) => string | null };
   const appCaller: Caller = { type: "app", id: INBOX_APP as `ins_${string}`, name: "Inbox", mode: null };
@@ -174,7 +177,7 @@ test("C86 chat: apps send from the owner-picked bot via the shared sender:<servi
   await s.run("channel_dm", { account: "slack", person: "U0OWNER", text: "second alert" });
   assert.deepEqual(s.w.sent.map((m) => m.text), ["first alert", "second alert"]);
   // Coordinator condition 1: an agent WITH a scope row on sender:slack (shared default) still cannot send from it.
-  const agentB = testCtx({ db: s.db, agent: B, access: { "sender:slack": "read_update" } });
+  const agentB = testCtx({ db: s.db, agent: B, access: { "sender:slack": "read_update" } }); // the SDK row is apps_only; the handler refuses regardless of level
   for (const op of ["channel_dm", "channel_send", "channel_dm_first", "channel_edit", "channel_react", "channel_conversations"]) {
     await assert.rejects(handlerOf(s.app, op)({ account: "sender:slack", person: "U0OWNER", conversation: "C1", messageId: "m1", text: "x", emoji: "+" }, agentB), isCode("sender_reserved_for_apps"), op);
   }

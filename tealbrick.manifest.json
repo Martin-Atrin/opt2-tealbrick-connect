@@ -2370,15 +2370,24 @@
             "update",
             "delete"
           ]
+        },
+        {
+          "id": "apps_only",
+          "label": "APPS ONLY (not usable by agents)",
+          "crud": [
+            "read",
+            "create",
+            "update"
+          ]
         }
       ],
       "defaultGrants": [
         {
           "kind": "shared",
-          "access": "read_update"
+          "access": "apps_only"
         }
       ],
-      "summaryTemplate": "{count} {labelPlural}"
+      "summaryTemplate": "{access.read} read, {access.read_update} write, {access.read_update_delete} all"
     }
   ],
   "settings": {
