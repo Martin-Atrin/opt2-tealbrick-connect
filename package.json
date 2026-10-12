@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/connect",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Teal Brick Connect miniapp: Composio, MCP connectors, Tealbrick catalog, Channels. Built on the Miniapp SDK.",
   "license": "MIT",

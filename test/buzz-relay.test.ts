@@ -5,7 +5,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { BuzzIdentities } from "../src/channels/buzz/identity.ts";
 
 import { eventId, generateSecretKey, type NostrEvent, publicKeyOf, signEvent, verifyEvent } from "../src/channels/buzz/nostr.ts";
-import { BuzzRelay, cleanText } from "../src/channels/buzz/relay.ts";
+import { type BuzzRefusal, BuzzRelay, cleanText } from "../src/channels/buzz/relay.ts";
 import { fakeFetch, memorySecrets, testDb } from "./helpers.ts";
 
 const CHANNEL = "0b7d6c2e-1f3a-4c5b-9d8e-7f6a5b4c3d2e";
@@ -98,4 +98,15 @@ test("post: kind 9 signed by the agent with h tag and NIP-10 reply tags", async 
 
 test("relay text cleaning keeps newlines and drops control and bidi characters", () => {
   assert.equal(cleanText("a\nb\u0007‮c"), "a\nbc");
+});
+
+test("posting to a channel the agent is not a member of is a clear refusal (QA S3)", async () => {
+  const db = testDb();
+  const relay = fakeFetch({
+    "POST /events": () => ({ status: 400, body: { error: "restricted: not a channel member" } }),
+  });
+  const identities = new BuzzIdentities({ db, secrets: memorySecrets(), fetchImpl: relay.impl, relayUrl: "wss://relay.test.example", allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"] });
+  await identities.generateAll([{ id: "agt_A", name: "A" }]);
+  const r = new BuzzRelay(identities, relay.impl);
+  await assert.rejects(r.post("agt_A", { channel: CHANNEL, content: "hi" }), (e: BuzzRefusal) => e.code === "buzz_not_member" && e.httpStatus === 403);
 });

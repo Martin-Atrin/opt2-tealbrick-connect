@@ -5,7 +5,7 @@
   "name": "Connect",
   "summary": "Connect your agents to the services you use: Gmail and 1,000+ apps through Composio, self-hosted apps, MCP servers and team chat.",
   "description": "Connect holds all outside connectivity for your agents.\n\n- **Services:** search a service, press Connect, sign in. Several accounts per service (for example two Gmail inboxes).\n- **Access per account and agent:** READ, READ/UPDATE (includes create and send) or READ/UPDATE/DELETE.\n- **As me or as itself:** an agent can use your account, or its own identity (for example its own Buzz identity).\n- **Channels:** Buzz identities for all your agents in one step.\n\nOutward and destructive actions follow your agent policy: held for your approval or recorded as receipts.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "sdkMajor": 1,
   "publisher": {
     "name": "Teal Brick",
@@ -110,7 +110,7 @@
     {
       "id": "accounts_list",
       "title": "List my connected accounts",
-      "description": "List the connected accounts you may use, with your access level for each.",
+      "description": "List the connected accounts you may use, with your access level for each (empty until the owner gives you access to an account).",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -170,7 +170,6 @@
         "read"
       ],
       "effect": "read",
-      "scopeType": "account",
       "idempotency": "none",
       "receipt": false,
       "audience": "agent"

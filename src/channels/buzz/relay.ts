@@ -6,7 +6,7 @@
  * - Messages: kind 9 with `h` = channel id; replies use NIP-10 `e` root/reply tags. Text from the relay is untrusted:
  *   events are signature-checked, control and bidi characters stripped, length capped.
  */
-import { type FetchLike, requestJson } from "../../util/http.ts";
+import { type FetchLike, requestJson, UpstreamError } from "../../util/http.ts";
 import type { BuzzIdentities } from "./identity.ts";
 import { type NostrEvent, npubEncode, verifyEvent } from "./nostr.ts";
 
@@ -34,6 +34,28 @@ export type BuzzMessage = {
 const tag = (event: NostrEvent, name: string) => event.tags.find((t) => t[0] === name)?.[1];
 const hasFlag = (event: NostrEvent, name: string) => event.tags.some((t) => t[0] === name && t.length === 1);
 
+/** A clear refusal for agent-facing Buzz errors (mapped to the SDK error envelope by the app). */
+export class BuzzRefusal extends Error {
+  readonly code: string;
+  readonly httpStatus: number;
+  constructor(code: string, message: string, httpStatus: number) {
+    super(message);
+    this.name = "BuzzRefusal";
+    this.code = code;
+    this.httpStatus = httpStatus;
+  }
+}
+
+/** Relay refusals Connect turns into named codes (NIP-01 machine-readable prefixes, Buzz relay wording). */
+export function relayRefusal(error: unknown): BuzzRefusal | null {
+  if (!(error instanceof UpstreamError) || error.status === null || error.status >= 500) return null;
+  if (/not a (channel|group) member|not a member/iu.test(error.message)) {
+    return new BuzzRefusal("buzz_not_member", "Your Buzz identity is not a member of this channel. Ask the owner to add your npub to the channel in Buzz.", 403);
+  }
+  if (/restricted:/iu.test(error.message)) return new BuzzRefusal("buzz_restricted", "The Buzz relay refused this action for your identity.", 403);
+  return null;
+}
+
 export function cleanText(text: string, max = MAX_TEXT): string {
   return text.replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c === "\n" || c === "\t" ? c : "")).slice(0, max);
 }
@@ -54,15 +76,19 @@ export class BuzzRelay {
   async #post<T>(agent: string, path: "/query" | "/events", payload: unknown): Promise<T> {
     const url = `${await this.#identities.relayHttpBase()}${path}`;
     const body = JSON.stringify(payload);
-    return requestJson<T>({
-      method: "POST",
-      url,
-      body: payload,
-      headers: { authorization: await this.#identities.authHeader(agent, { url, method: "POST", body }) },
-      timeoutMs: 15_000,
-      retries: path === "/query" ? 2 : 0,
-      ...(this.#fetch ? { fetchImpl: this.#fetch } : {}),
-    });
+    try {
+      return await requestJson<T>({
+        method: "POST",
+        url,
+        body: payload,
+        headers: { authorization: await this.#identities.authHeader(agent, { url, method: "POST", body }) },
+        timeoutMs: 15_000,
+        retries: path === "/query" ? 2 : 0,
+        ...(this.#fetch ? { fetchImpl: this.#fetch } : {}),
+      });
+    } catch (error) {
+      throw relayRefusal(error) ?? error;
+    }
   }
 
   async query(agent: string, filters: Record<string, unknown>[]): Promise<NostrEvent[]> {
@@ -123,7 +149,11 @@ export class BuzzRelay {
     }
     const event = await this.#identities.sign(agent, { kind: KIND_CHAT, tags, content });
     const answer = await this.#post<{ accepted?: boolean; message?: string }>(agent, "/events", event);
-    if (answer?.accepted === false) throw new Error(`buzz_rejected: ${cleanText(String(answer.message ?? ""), 200)}`);
+    if (answer?.accepted === false) {
+      const reason = cleanText(String(answer.message ?? ""), 200);
+      if (/not a (channel|group) member|not a member/iu.test(reason)) throw relayRefusal(new UpstreamError("upstream_error", reason, 400)) as BuzzRefusal;
+      throw new BuzzRefusal("buzz_rejected", `The Buzz relay rejected the message: ${reason}`, 409);
+    }
     return { id: event.id };
   }
 }

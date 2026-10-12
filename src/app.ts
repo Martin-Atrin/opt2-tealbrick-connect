@@ -10,7 +10,7 @@ import type { Db, DynamicHandlers, Handler, HandlerSpec, Json, OpContext, Public
 
 import { type Account, AccountStore, CONNECTION_KINDS, type ConnectionKind } from "./accounts.ts";
 import { BuzzIdentities } from "./channels/buzz/identity.ts";
-import { BuzzRelay } from "./channels/buzz/relay.ts";
+import { BuzzRefusal, BuzzRelay } from "./channels/buzz/relay.ts";
 import { CatalogCallError } from "./sources/catalog/http.ts";
 import { CatalogError, CatalogSource } from "./sources/catalog/source.ts";
 import { ComposioClient, ComposioError, type ComposioToolkit } from "./sources/composio/client.ts";
@@ -20,7 +20,7 @@ import { McpError } from "./sources/mcp/client.ts";
 import { OAuthError } from "./sources/mcp/oauth.ts";
 import { McpSource } from "./sources/mcp/source.ts";
 import { ACCOUNT_ARGUMENT, ToolRegistry } from "./tools.ts";
-import type { FetchLike } from "./util/http.ts";
+import { type FetchLike, UpstreamError } from "./util/http.ts";
 import { NetPolicyError } from "./util/net-policy.ts";
 
 export const PRODUCT_SCOPE = "account";
@@ -149,6 +149,8 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       if (error instanceof ComposioError) fail(error.code, error.message, error.status);
       if (error instanceof NetPolicyError) fail(error.code, error.message, 422);
       if (error instanceof CatalogError) fail(error.code, error.message, error.code === "catalog_app_unknown" || error.code === "tool_unknown" ? 404 : 400);
+      if (error instanceof BuzzRefusal) fail(error.code, error.message, error.httpStatus);
+      if (error instanceof UpstreamError) fail(error.code, error.message.slice(0, 300), error.status && error.status < 500 ? 409 : 502);
       if (error instanceof OAuthError) fail(error.code, error.message, 502);
       if (error instanceof McpError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
       if (error instanceof CatalogCallError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
@@ -234,8 +236,8 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
   const handlers: Record<string, Handler | HandlerSpec> = {
     // ── agent ops ──
     accounts_list: {
-      // Spans every account of the scope type; the handler filters with ctx.scope (SDK-API §3).
-      scope: () => null,
+      // No manifest scopeType: an agent with no account access yet gets an empty list, not a scope refusal.
+      // The handler filters every account by the caller's own scope access (ctx.scope).
       run: async (input, ctx) => {
       const s = services(ctx);
       const service = str(asInput(input).service);
