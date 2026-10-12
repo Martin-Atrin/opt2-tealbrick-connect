@@ -12,6 +12,9 @@ import { type NostrEvent, npubEncode, parsePubkey, verifyEvent } from "./nostr.t
 
 export const KIND_CHAT = 9;
 export const KIND_DM_OPEN = 41010;
+export const KIND_REACTION = 7;
+export const KIND_DELETION = 5;
+export const KIND_EDIT = 40003;
 export const KIND_GROUP_METADATA = 39000;
 export const KIND_GROUP_MEMBERS = 39002;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -184,5 +187,41 @@ export class BuzzRelay {
     if (!channel) throw new BuzzRefusal("buzz_bad_response", "The Buzz relay did not return the conversation id.", 502);
     const posted = await this.post(agent, { channel, content: input.content });
     return { id: posted.id, channel, to: npubEncode(to) };
+  }
+
+  async #publish(agent: string, kind: number, tags: string[][], content: string): Promise<{ id: string }> {
+    const event = await this.#identities.sign(agent, { kind, tags, content });
+    const answer = await this.#post<{ accepted?: boolean; message?: string }>(agent, "/events", event);
+    if (answer?.accepted === false) {
+      const reason = cleanText(String(answer.message ?? ""), 200);
+      if (/not a (channel|group) member|not a member/iu.test(reason)) throw relayRefusal(new UpstreamError("upstream_error", reason, 400)) as BuzzRefusal;
+      throw new BuzzRefusal("buzz_rejected", `The Buzz relay rejected the action: ${reason}`, 409);
+    }
+    return { id: event.id };
+  }
+
+  /** Reaction (kind 7) on a message in a channel: one emoji or short symbol (v1 rule). */
+  async react(agent: string, input: { channel: string; messageId: string; emoji: string }): Promise<{ id: string }> {
+    if (!isChannelId(input.channel)) throw new Error("buzz_channel_invalid");
+    if (!/^[0-9a-f]{64}$/u.test(input.messageId)) throw new BuzzRefusal("buzz_message_invalid", "messageId must be a 64-hex event id.", 400);
+    const points = Array.from(input.emoji);
+    if (points.length < 1 || points.length > 16 || /[\s:]/u.test(input.emoji) || /[\p{Cc}\p{Cf}]/u.test(input.emoji)) {
+      throw new BuzzRefusal("buzz_reaction_invalid", "A reaction is one emoji or a short symbol such as +.", 400);
+    }
+    return this.#publish(agent, KIND_REACTION, [["e", input.messageId], ["h", input.channel]], input.emoji);
+  }
+
+  /** Edit (kind 40003) of an own message; the caller checks ownership. Edits never mention anyone. */
+  async edit(agent: string, input: { channel: string; messageId: string; content: string }): Promise<{ id: string }> {
+    if (!isChannelId(input.channel)) throw new Error("buzz_channel_invalid");
+    const content = input.content.trim();
+    if (!content || content.length > MAX_TEXT) throw new Error("buzz_content_invalid");
+    return this.#publish(agent, KIND_EDIT, [["h", input.channel], ["e", input.messageId]], content);
+  }
+
+  /** Deletion (kind 5, single target) of an own message; the caller checks ownership. */
+  async remove(agent: string, input: { channel: string; messageId: string }): Promise<{ id: string }> {
+    if (!isChannelId(input.channel)) throw new Error("buzz_channel_invalid");
+    return this.#publish(agent, KIND_DELETION, [["h", input.channel], ["e", input.messageId]], "");
   }
 }

@@ -7,11 +7,12 @@ import { createRoot } from "react-dom/client";
 import { Notice } from "./components.tsx";
 import { Accounts } from "./pages/Accounts.tsx";
 import { Buzz } from "./pages/Buzz.tsx";
+import { Chat } from "./pages/Chat.tsx";
 import { Services } from "./pages/Services.tsx";
 import { Agents, Backups, Holds, Keys, Receipts } from "./pages/Standard.tsx";
 import { ROUTES, type Route, useRoute } from "./router.ts";
 
-const PAGES = [{ id: "services", label: "Services" }, { id: "accounts", label: "Accounts" }, { id: "buzz", label: "Buzz" }, ...STANDARD_PAGES];
+const PAGES = [{ id: "services", label: "Services" }, { id: "accounts", label: "Accounts" }, { id: "buzz", label: "Buzz" }, { id: "chat", label: "Chat bots" }, ...STANDARD_PAGES];
 
 function Page({ route, go }: { route: Route; go(route: Route): void }) {
   switch (route) {
@@ -21,6 +22,8 @@ function Page({ route, go }: { route: Route; go(route: Route): void }) {
       return <Accounts />;
     case "buzz":
       return <Buzz />;
+    case "chat":
+      return <Chat />;
     case "holds":
       return <Holds />;
     case "receipts":

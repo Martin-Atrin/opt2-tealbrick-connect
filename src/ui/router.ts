@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 /** Connect pages first, then the SDK standard pages (ui STANDARD_PAGES ids). */
-export const ROUTES = ["services", "accounts", "buzz", "holds", "receipts", "agents", "keys", "backups"] as const;
+export const ROUTES = ["services", "accounts", "buzz", "chat", "holds", "receipts", "agents", "keys", "backups"] as const;
 export type Route = (typeof ROUTES)[number];
 
 /** App base path (manifest ui paths live under `/a/<product>/`, see index.html `<base>`). */

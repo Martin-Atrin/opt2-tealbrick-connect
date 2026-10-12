@@ -34,7 +34,7 @@ const origins = [new URL(relayUrl).origin, new URL(httpBase).origin];
 
 function memoryDb(): Db {
   const db = new DatabaseSync(":memory:");
-  for (const f of ["0001_init.sql", "0002_drop_unused_tables.sql", "0003_buzz_contacts.sql"]) db.exec(readFileSync(join(import.meta.dirname, "..", "migrations", f), "utf8"));
+  for (const f of ["0001_init.sql", "0002_drop_unused_tables.sql", "0003_buzz_contacts.sql", "0004_channels.sql"]) db.exec(readFileSync(join(import.meta.dirname, "..", "migrations", f), "utf8"));
   return {
     exec: (sql) => db.exec(sql),
     prepare: (sql) => {

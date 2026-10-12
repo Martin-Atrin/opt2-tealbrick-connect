@@ -32,6 +32,8 @@ export interface CatalogApp {
   labels: EntryLabels;
   spec: unknown;
   basePathOverride: string | undefined;
+  /** operationId the app answers cheaply when the account works (entry `healthOperation`). */
+  healthOperation: string | null;
 }
 
 export class CatalogError extends Error {
@@ -75,6 +77,7 @@ export function parseBundle(gz: Uint8Array, pin: string): CatalogApp[] {
       },
       spec: JSON.parse(specFile.content),
       basePathOverride: typeof openapi.basePath === "string" ? openapi.basePath : undefined,
+      healthOperation: typeof entry.healthOperation === "string" ? entry.healthOperation : null,
     };
   });
 }
@@ -209,6 +212,23 @@ export class CatalogSource {
       ...(this.#d.allowOrigins ? { allowOrigins: this.#d.allowOrigins } : {}),
     });
     return result.data;
+  }
+
+  /** Connection test: call the app's `healthOperation` with the account's credentials (read-only operations only). */
+  async test(account: Account): Promise<{ ok: boolean; operation: string | null; detail: string }> {
+    const app = (await this.apps()).get(account.service);
+    if (!app) throw new CatalogError("catalog_app_unknown", `Unknown catalog app ${account.service}.`);
+    if (!app.healthOperation) return { ok: false, operation: null, detail: "This app has no test operation." };
+    const compiled = await this.#compiledFor(app);
+    const name = catalogToolName(app.id, app.healthOperation);
+    const op = compiled.byName.get(name);
+    if (op?.effect !== "read") return { ok: false, operation: app.healthOperation, detail: "The test operation is not a read operation." };
+    try {
+      await this.execute(account, name, {});
+      return { ok: true, operation: app.healthOperation, detail: "The app answered." };
+    } catch (error) {
+      return { ok: false, operation: app.healthOperation, detail: error instanceof Error ? error.message.slice(0, 300) : "The test failed." };
+    }
   }
 
   async disconnect(account: Account): Promise<Account> {

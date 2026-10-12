@@ -108,3 +108,19 @@ export function normalizeAgents(raw: unknown): AgentInfo[] {
 export const agentsList = async (): Promise<AgentInfo[]> => normalizeAgents(await callOp<Json>("tb.agents_list", {}));
 export const scopesSet = (agent: string, accountId: string, access: AccessLevel | null) =>
   callOp<Json>("tb.scopes_set", { agent, type: "account", id: accountId, access });
+
+export const catalogAccountTest = (id: string) => callOp<{ ok: boolean; operation: string | null; detail: string }>("catalog_account_test", { id });
+
+export interface ChannelProviderInfo {
+  service: "slack" | "teams" | "telegram" | "discord";
+  credentialFields: string[];
+  settingFields: { key: string; label: string; type: "boolean" | "string"; default: boolean | string }[];
+  inbound: "socket" | "poll" | "webhook";
+}
+export interface ChannelAccountInfo extends Account {
+  bot: { id: string; name: string; inbound: string; detail: string } | null;
+}
+export const channelProviders = () => callOp<{ services: ChannelProviderInfo[]; agents: { id: string; name: string }[] }>("channel_providers", {});
+export const channelAccounts = () => callOp<{ accounts: ChannelAccountInfo[] }>("channel_accounts", {});
+export const channelAccountConnect = (input: { service: string; label: string; agent: string; credentials: Record<string, string>; settings?: Record<string, string | boolean> }) =>
+  callOp<{ account: Account }>("channel_account_connect", input);

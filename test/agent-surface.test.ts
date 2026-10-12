@@ -11,10 +11,10 @@ import { handlerOf, root, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
 
-test("only the dynamic tools family is account-scoped; Buzz ops and accounts_list need no scope access", () => {
+test("account-scoped ops are the tools family and the chat-bot ops; Buzz ops and accounts_list need no scope access", () => {
   const scoped = manifest.operations.filter((o) => o.audience === "agent" && o.scopeType).map((o) => o.id);
-  assert.deepEqual(scoped, ["tools"]);
-  for (const id of ["buzz_identity", "buzz_channels", "buzz_read", "buzz_post", "accounts_list"]) {
+  assert.deepEqual(scoped.filter((id) => !id.startsWith("channel_")), ["tools"]);
+  for (const id of ["buzz_identity", "buzz_channels", "buzz_read", "buzz_post", "buzz_react", "buzz_edit", "buzz_delete", "buzz_schedule", "buzz_dm_first", "buzz_dm", "accounts_list"]) {
     const op = manifest.operations.find((o) => o.id === id);
     assert.ok(op && op.audience === "agent" && !op.scopeType, id);
   }

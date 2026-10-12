@@ -63,6 +63,10 @@ export default async function start(env: Record<string, string>): Promise<{ url:
       buzz_post: withIdentity(definition.handlers.buzz_post),
       buzz_dm_first: withIdentity(definition.handlers.buzz_dm_first),
       buzz_dm: withIdentity(definition.handlers.buzz_dm),
+      buzz_react: withIdentity(definition.handlers.buzz_react),
+      buzz_edit: withIdentity(definition.handlers.buzz_edit),
+      buzz_delete: withIdentity(definition.handlers.buzz_delete),
+      buzz_schedule: withIdentity(definition.handlers.buzz_schedule),
     },
   });
   const running = await startApp(app, env);

@@ -1,0 +1,369 @@
+/**
+ * Channel service (C58): Slack, Teams, Telegram and Discord connections behind the one provider interface.
+ * Owns: channel accounts (connect_accounts source 'channel', kind 'as_itself', one agent per bot), the inbox with a
+ * monotonic `seq` cursor, the sent-message ledger (edit/delete/react own messages only), first-contact records and the
+ * long-running inbound workers (socket / long-poll) plus webhook delivery (Teams, via a manifest public route).
+ * Credentials: SDK app secrets (`account:<id>`), never the database; never logged.
+ */
+import type { AppSecrets } from "@opt2-tealbrick/miniapp-sdk";
+import type { Db, Logger } from "@opt2-tealbrick/spec/sdk";
+
+import type { Account, AccountStore } from "../accounts.ts";
+import {
+  type BotIdentity,
+  CHANNEL_SERVICES,
+  type ChannelCredentials,
+  ChannelError,
+  type ChannelNet,
+  type ChannelProvider,
+  type InboundMessage,
+  type ChannelService as ServiceId,
+} from "./provider.ts";
+
+export const INBOX_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const RESTART_BACKOFF_MS = [5_000, 15_000, 60_000, 300_000];
+
+export interface InboxRow {
+  seq: number;
+  account: string;
+  service: string;
+  conversation: string;
+  conversationType: string;
+  messageId: string;
+  threadId: string | null;
+  sender: { id: string; name: string };
+  text: string;
+  sentAt: number;
+}
+
+export interface ChannelDeps {
+  db: Db;
+  accounts: AccountStore;
+  secrets: AppSecrets;
+  providers: ReadonlyMap<ServiceId, ChannelProvider>;
+  net: ChannelNet;
+  log?: Logger;
+}
+
+type BotRow = BotIdentity & { settings: Record<string, string>; inboundState: string; inboundDetail: string };
+
+export function isChannelService(value: string): value is ServiceId {
+  return (CHANNEL_SERVICES as readonly string[]).includes(value);
+}
+
+export class ChannelHub {
+  readonly #d: ChannelDeps;
+  readonly #workers = new Map<string, AbortController>();
+
+  constructor(deps: ChannelDeps) {
+    this.#d = deps;
+  }
+
+  provider(service: string): ChannelProvider {
+    const p = isChannelService(service) ? this.#d.providers.get(service) : undefined;
+    if (!p) throw new ChannelError("channel_service_unknown", `Unknown channel service ${service}.`, 404);
+    return p;
+  }
+
+  bot(accountId: string): BotRow | null {
+    const r = this.#d.db.prepare("SELECT * FROM connect_channel_bots WHERE account_id = ?").get(accountId);
+    if (!r) return null;
+    return {
+      botId: String(r.bot_id),
+      botName: String(r.bot_name),
+      ...(r.workspace ? { workspace: String(r.workspace) } : {}),
+      settings: JSON.parse(String(r.settings)) as Record<string, string>,
+      inboundState: String(r.inbound_state),
+      inboundDetail: String(r.inbound_detail),
+    };
+  }
+
+  async #creds(account: Account): Promise<ChannelCredentials> {
+    const raw = await this.#d.secrets.get(`account:${account.id}`);
+    if (!raw) throw new ChannelError("channel_credentials_missing", "This channel connection has no credentials; connect it again.", 409);
+    return { ...(JSON.parse(raw) as ChannelCredentials), ...(this.bot(account.id)?.settings ?? {}) };
+  }
+
+  /** The agent's own connected channel account, or a clear refusal. */
+  account(id: string, agent: string): Account {
+    const a = this.#d.accounts.get(id);
+    if (a?.source !== "channel") throw new ChannelError("channel_account_unknown", "No such channel connection.", 404);
+    if (a.status !== "connected") throw new ChannelError("channel_account_not_connected", "This channel connection is not connected.", 409);
+    if (a.ownerAgent !== agent) throw new ChannelError("scope_denied", "This channel bot belongs to another agent.", 403);
+    return a;
+  }
+
+  // ── owner actions ──
+
+  async connect(input: { service: string; label: string; agent: string; credentials: Record<string, unknown>; settings?: Record<string, unknown> }): Promise<Account> {
+    const provider = this.provider(input.service);
+    const creds: ChannelCredentials = {};
+    for (const field of provider.credentialFields) {
+      const v = input.credentials[field];
+      if (typeof v !== "string" || !v.trim()) throw new ChannelError("credentials_missing", `Enter the ${field.replace(/_/gu, " ")}.`);
+      creds[field] = v.trim();
+    }
+    const settings: Record<string, string> = {};
+    for (const f of provider.settingFields ?? []) {
+      const v = input.settings?.[f.key];
+      settings[f.key] = String(v === undefined ? f.default : v);
+    }
+    const bot = await provider.verify({ ...creds, ...settings }, this.#d.net);
+    const account = this.#d.accounts.create({
+      service: provider.service,
+      source: "channel",
+      kind: "as_itself",
+      label: input.label,
+      ownerAgent: input.agent,
+      externalRef: bot.botId,
+      status: "connected",
+    });
+    await this.#d.secrets.put(`account:${account.id}`, JSON.stringify(creds));
+    this.#d.db
+      .prepare("INSERT INTO connect_channel_bots (account_id, bot_id, bot_name, workspace, settings, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(account.id, bot.botId, bot.botName.slice(0, 120), bot.workspace ?? null, JSON.stringify(settings), Date.now());
+    await this.refreshConversations(account).catch(() => undefined);
+    this.start(account);
+    return account;
+  }
+
+  async disconnect(account: Account): Promise<Account> {
+    this.stop(account.id);
+    await this.#d.secrets.delete(`account:${account.id}`);
+    return this.#d.accounts.update(account.id, { status: "revoked", detail: "Disconnected by the owner." });
+  }
+
+  // ── conversations ──
+
+  async refreshConversations(account: Account): Promise<void> {
+    const provider = this.provider(account.service);
+    const bot = this.bot(account.id);
+    if (!bot) return;
+    const list = await provider.conversations(await this.#creds(account), this.#d.net, bot);
+    for (const c of list.slice(0, 200)) this.#rememberConversation(account.id, c.id, c.name, c.type);
+  }
+
+  #rememberConversation(accountId: string, conversation: string, name: string, type: string): void {
+    this.#d.db
+      .prepare(
+        `INSERT INTO connect_channel_conversations (account_id, conversation, name, type, last_seen_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (account_id, conversation) DO UPDATE SET name = excluded.name, type = excluded.type, last_seen_at = excluded.last_seen_at`,
+      )
+      .run(accountId, conversation, name.slice(0, 120), type, Date.now());
+  }
+
+  conversations(accountId: string): { id: string; name: string; type: string }[] {
+    return this.#d.db
+      .prepare("SELECT conversation, name, type FROM connect_channel_conversations WHERE account_id = ? ORDER BY name LIMIT 200")
+      .all(accountId)
+      .map((r) => ({ id: String(r.conversation), name: String(r.name), type: String(r.type) }));
+  }
+
+  // ── inbound ──
+
+  /** Store one inbound message (dedupe; own sent messages dropped). Returns true when new. */
+  ingest(account: Account, m: InboundMessage): boolean {
+    const own = this.#d.db.prepare("SELECT 1 FROM connect_channel_sent WHERE account_id = ? AND conversation = ? AND message_id = ?").get(account.id, m.conversation, m.messageId);
+    if (own) return false;
+    this.#rememberConversation(account.id, m.conversation, m.conversationName ?? m.conversation, m.conversationType);
+    const r = this.#d.db
+      .prepare(
+        `INSERT OR IGNORE INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, thread_id, sender_id, sender_name, text, sent_at, received_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(account.id, m.conversation, m.conversationType, m.messageId, m.threadId, m.senderId, m.senderName.slice(0, 120), m.text, m.sentAt, Date.now());
+    return r.changes > 0;
+  }
+
+  inbox(accountIds: readonly string[], sinceSeq: number, limit: number): { messages: InboxRow[]; nextSeq: number } {
+    if (accountIds.length === 0) return { messages: [], nextSeq: sinceSeq };
+    const placeholders = accountIds.map(() => "?").join(", ");
+    const rows = this.#d.db
+      .prepare(
+        `SELECT i.*, a.service FROM connect_channel_inbox i JOIN connect_accounts a ON a.id = i.account_id
+         WHERE i.account_id IN (${placeholders}) AND i.seq > ? ORDER BY i.seq LIMIT ?`,
+      )
+      .all(...accountIds, sinceSeq, Math.max(1, Math.min(limit, 100)));
+    const messages = rows.map((r) => ({
+      seq: Number(r.seq),
+      account: String(r.account_id),
+      service: String(r.service),
+      conversation: String(r.conversation),
+      conversationType: String(r.conversation_type),
+      messageId: String(r.message_id),
+      threadId: r.thread_id === null ? null : String(r.thread_id),
+      sender: { id: String(r.sender_id), name: String(r.sender_name) },
+      text: String(r.text),
+      sentAt: Number(r.sent_at),
+    }));
+    return { messages, nextSeq: messages.at(-1)?.seq ?? sinceSeq };
+  }
+
+  inboundRow(accountId: string, seq: number): InboxRow | null {
+    return this.inbox([accountId], seq - 1, 1).messages.find((m) => m.seq === seq) ?? null;
+  }
+
+  /** Webhook delivery (Teams): the first connected account of the service whose verification succeeds takes it. */
+  async webhook(service: ServiceId, request: { headers: Headers; body: string }): Promise<{ status: number; body: string; contentType?: string }> {
+    const provider = this.provider(service);
+    if (provider.inbound.kind !== "webhook") return { status: 404, body: "" };
+    for (const account of this.#d.accounts.list({ service, status: "connected" }).filter((a) => a.source === "channel")) {
+      const bot = this.bot(account.id);
+      if (!bot) continue;
+      try {
+        const out = await provider.inbound.verifyWebhook(request, await this.#creds(account), this.#d.net, bot);
+        for (const m of out.messages) this.ingest(account, m);
+        return out.reply ?? { status: 200, body: "" };
+      } catch (error) {
+        if (!(error instanceof ChannelError) || error.code !== "channel_webhook_unauthorized") this.#d.log?.warn("channel webhook failed", { service, code: (error as { code?: string }).code ?? "error" });
+      }
+    }
+    return { status: 401, body: "" };
+  }
+
+  // ── outbound (agent) ──
+
+  async #recordSent(account: Account, conversation: string, messageId: string, agent: string): Promise<void> {
+    this.#d.db
+      .prepare("INSERT OR IGNORE INTO connect_channel_sent (account_id, conversation, message_id, agent, sent_at) VALUES (?, ?, ?, ?, ?)")
+      .run(account.id, conversation, messageId, agent, Date.now());
+  }
+
+  #knownPerson(account: Account, personId: string): string | null {
+    const contact = this.#d.db.prepare("SELECT conversation FROM connect_channel_contacts WHERE account_id = ? AND person_id = ?").get(account.id, personId);
+    if (contact) return String(contact.conversation);
+    // A person who wrote to the bot in a direct conversation is not a first contact.
+    const wrote = this.#d.db
+      .prepare("SELECT conversation FROM connect_channel_inbox WHERE account_id = ? AND sender_id = ? AND conversation_type = 'direct' ORDER BY seq DESC LIMIT 1")
+      .get(account.id, personId);
+    return wrote ? String(wrote.conversation) : null;
+  }
+
+  #checkText(provider: ChannelProvider, text: string): string {
+    const t = text.trim();
+    if (!t) throw new ChannelError("channel_message_empty", "The message is empty.");
+    if (t.length > provider.maxTextLength) throw new ChannelError("channel_text_too_long", `The message is ${t.length} characters; ${provider.service} allows ${provider.maxTextLength}.`);
+    return t;
+  }
+
+  async send(account: Account, agent: string, input: { conversation: string; text: string; threadId?: string | null }): Promise<{ messageId: string; conversation: string }> {
+    const provider = this.provider(account.service);
+    const known = this.#d.db.prepare("SELECT type FROM connect_channel_conversations WHERE account_id = ? AND conversation = ?").get(account.id, input.conversation);
+    if (known?.type === "direct") {
+      const wrote = this.#d.db.prepare("SELECT 1 FROM connect_channel_inbox WHERE account_id = ? AND conversation = ? LIMIT 1").get(account.id, input.conversation);
+      const contact = this.#d.db.prepare("SELECT 1 FROM connect_channel_contacts WHERE account_id = ? AND conversation = ?").get(account.id, input.conversation);
+      if (!wrote && !contact) throw new ChannelError("channel_first_contact_required", "This is a direct conversation with someone you have not written to. Use channel_dm_first.", 409);
+    }
+    const text = this.#checkText(provider, input.text);
+    const out = await provider.send(await this.#creds(account), this.#d.net, { conversation: input.conversation, text, threadId: input.threadId ?? null });
+    await this.#recordSent(account, input.conversation, out.messageId, agent);
+    return { messageId: out.messageId, conversation: input.conversation };
+  }
+
+  async reply(account: Account, agent: string, input: { seq: number; text: string }): Promise<{ messageId: string; conversation: string }> {
+    const row = this.inboundRow(account.id, input.seq);
+    if (!row) throw new ChannelError("channel_message_unknown", "No inbound message with that seq on this connection.", 404);
+    const threadId = account.service === "slack" || account.service === "teams" ? (row.threadId ?? row.messageId) : row.messageId;
+    return this.send(account, agent, { conversation: row.conversation, text: input.text, threadId });
+  }
+
+  async directMessage(account: Account, agent: string, input: { person: string; text: string; first: boolean }): Promise<{ messageId: string; conversation: string }> {
+    const provider = this.provider(account.service);
+    const known = this.#knownPerson(account, input.person);
+    if (!input.first && !known) throw new ChannelError("channel_first_contact_required", "You have not written to this person before. Use channel_dm_first; the owner approves first contact.", 409);
+    const text = this.#checkText(provider, input.text);
+    const creds = await this.#creds(account);
+    const conversation = known ?? (await provider.openDirect(creds, this.#d.net, { personId: input.person })).conversation;
+    const out = await provider.send(creds, this.#d.net, { conversation, text });
+    await this.#recordSent(account, conversation, out.messageId, agent);
+    this.#rememberConversation(account.id, conversation, `Direct: ${input.person.slice(-24)}`, "direct");
+    this.#d.db
+      .prepare("INSERT OR IGNORE INTO connect_channel_contacts (account_id, person_id, conversation, first_sent_at) VALUES (?, ?, ?, ?)")
+      .run(account.id, input.person, conversation, Date.now());
+    return { messageId: out.messageId, conversation };
+  }
+
+  #ownMessage(account: Account, conversation: string, messageId: string): void {
+    const own = this.#d.db.prepare("SELECT 1 FROM connect_channel_sent WHERE account_id = ? AND conversation = ? AND message_id = ?").get(account.id, conversation, messageId);
+    if (!own) throw new ChannelError("channel_not_own_message", "You can only change messages you sent through Connect.", 403);
+  }
+
+  async edit(account: Account, input: { conversation: string; messageId: string; text: string }): Promise<void> {
+    const provider = this.provider(account.service);
+    this.#ownMessage(account, input.conversation, input.messageId);
+    await provider.edit(await this.#creds(account), this.#d.net, { ...input, text: this.#checkText(provider, input.text) });
+  }
+
+  async delete(account: Account, input: { conversation: string; messageId: string }): Promise<void> {
+    this.#ownMessage(account, input.conversation, input.messageId);
+    await this.provider(account.service).delete(await this.#creds(account), this.#d.net, input);
+    this.#d.db.prepare("DELETE FROM connect_channel_sent WHERE account_id = ? AND conversation = ? AND message_id = ?").run(account.id, input.conversation, input.messageId);
+  }
+
+  async react(account: Account, input: { conversation: string; messageId: string; emoji: string }): Promise<void> {
+    await this.provider(account.service).react(await this.#creds(account), this.#d.net, input);
+  }
+
+  // ── inbound workers ──
+
+  /** Start inbound for every connected channel account (app start). */
+  startAll(): void {
+    for (const a of this.#d.accounts.list({ status: "connected" })) if (a.source === "channel") this.start(a);
+  }
+
+  #setState(accountId: string, state: string, detail = ""): void {
+    this.#d.db.prepare("UPDATE connect_channel_bots SET inbound_state = ?, inbound_detail = ?, updated_at = ? WHERE account_id = ?").run(state, detail.slice(0, 300), Date.now(), accountId);
+  }
+
+  start(account: Account): void {
+    const provider = this.provider(account.service);
+    const inbound = provider.inbound;
+    if (inbound.kind === "webhook") {
+      this.#setState(account.id, "webhook", "Messages arrive through the workspace door (public route).");
+      return;
+    }
+    if (this.#workers.has(account.id)) return;
+    const controller = new AbortController();
+    this.#workers.set(account.id, controller);
+    const loop = async () => {
+      let attempt = 0;
+      while (!controller.signal.aborted) {
+        const bot = this.bot(account.id);
+        if (!bot) return;
+        try {
+          this.#setState(account.id, "running");
+          const creds = await this.#creds(account);
+          await inbound.run(creds, this.#d.net, bot, (m) => void this.ingest(account, m), controller.signal);
+          if (controller.signal.aborted) break;
+          attempt = 0;
+        } catch (error) {
+          const code = (error as { code?: string }).code ?? "error";
+          if (code === "channel_credentials_rejected" || code === "channel_gateway_refused") {
+            this.#setState(account.id, "failed", error instanceof Error ? error.message : code);
+            this.#workers.delete(account.id);
+            return;
+          }
+          this.#setState(account.id, "retrying", code);
+          this.#d.log?.warn("channel inbound stopped; retrying", { service: account.service, code });
+          await this.#d.net.sleep(RESTART_BACKOFF_MS[Math.min(attempt, RESTART_BACKOFF_MS.length - 1)] as number, controller.signal).catch(() => undefined);
+          attempt += 1;
+        }
+      }
+      this.#setState(account.id, "stopped");
+    };
+    void loop();
+  }
+
+  stop(accountId: string): void {
+    this.#workers.get(accountId)?.abort();
+    this.#workers.delete(accountId);
+  }
+
+  stopAll(): void {
+    for (const id of [...this.#workers.keys()]) this.stop(id);
+  }
+
+  purge(now = Date.now()): void {
+    this.#d.db.prepare("DELETE FROM connect_channel_inbox WHERE received_at < ?").run(now - INBOX_RETENTION_MS);
+  }
+}

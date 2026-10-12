@@ -44,7 +44,7 @@ function bundle() {
     entries: [
       {
         id: "mailer",
-        entry: { schema: 1, id: "mailer", displayName: "Mailer", description: "Lists", category: "Marketing", app: { version: "1.0" }, source: "openapi", openapi: { spec: "openapi.json", sha256: sha(content) }, auth: { type: "header", name: "Authorization", prefix: "token ", label: "API token" }, baseUrlExample: "https://mailer.example.com", ...labels },
+        entry: { schema: 1, id: "mailer", displayName: "Mailer", description: "Lists", category: "Marketing", app: { version: "1.0" }, source: "openapi", openapi: { spec: "openapi.json", sha256: sha(content) }, auth: { type: "header", name: "Authorization", prefix: "token ", label: "API token" }, healthOperation: "getSubscribers", baseUrlExample: "https://mailer.example.com", ...labels },
         files: [{ name: "openapi.json", sha256: sha(content), content }],
       },
     ],
@@ -121,6 +121,8 @@ test("app: connect a catalog account with an API key, tiers apply, secrets scrub
     await assert.rejects(dyn.call("cb_mailer_createsubscriber", { body: { email: "b@example.com" } }, reader), (e: ConnectError) => e.code === "scope_denied");
     const writer = testCtx({ db, access: { [out.account.id]: "read_update" } });
     assert.deepEqual(((await dyn.call("cb_mailer_createsubscriber", { body: { email: "b@example.com" } }, writer)) as { data: unknown }).data, { id: 1 });
+    const tested = (await handlerOf(app, "catalog_account_test")({ id: out.account.id }, person)) as { ok: boolean; operation: string };
+    assert.deepEqual([tested.ok, tested.operation], [true, "getSubscribers"]);
     const disc = (await handlerOf(app, "account_disconnect")({ id: out.account.id }, person)) as { account: { status: string } };
     assert.equal(disc.account.status, "revoked");
     assert.deepEqual(secretsFor(db).names(), []);

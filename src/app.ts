@@ -6,12 +6,15 @@
 
 import type { AppSecrets, SdkAppDefinition, SdkOpContext, SdkPublicContext } from "@opt2-tealbrick/miniapp-sdk";
 import type { CrudAction, DynamicCatalogEntry, DynamicResolution, DynamicSearchInput, Manifest } from "@opt2-tealbrick/spec/manifest";
-import type { Db, DynamicHandlers, Handler, HandlerSpec, Json, OpContext, PublicHandler } from "@opt2-tealbrick/spec/sdk";
+import type { Db, DynamicHandlers, Handler, HandlerSpec, Json, Logger, OpContext, PublicHandler } from "@opt2-tealbrick/spec/sdk";
 
 import { type Account, AccountStore, CONNECTION_KINDS, type ConnectionKind } from "./accounts.ts";
 import { BuzzIdentities } from "./channels/buzz/identity.ts";
 import { parsePubkey } from "./channels/buzz/nostr.ts";
 import { BuzzRefusal, BuzzRelay } from "./channels/buzz/relay.ts";
+import { ChannelError, type ChannelNet, type ChannelProvider, type ChannelService as ChannelServiceId } from "./channels/provider.ts";
+import { channelProviders } from "./channels/registry.ts";
+import { ChannelHub, isChannelService } from "./channels/service.ts";
 import { CatalogCallError } from "./sources/catalog/http.ts";
 import { CatalogError, CatalogSource } from "./sources/catalog/source.ts";
 import { ComposioClient, ComposioError, type ComposioToolkit } from "./sources/composio/client.ts";
@@ -22,6 +25,7 @@ import { OAuthError } from "./sources/mcp/oauth.ts";
 import { McpSource } from "./sources/mcp/source.ts";
 import { ACCOUNT_ARGUMENT, ToolRegistry } from "./tools.ts";
 import { type FetchLike, UpstreamError } from "./util/http.ts";
+import { newId } from "./util/ids.ts";
 import { NetPolicyError } from "./util/net-policy.ts";
 import { pinnedFetch } from "./util/pinned-fetch.ts";
 
@@ -29,6 +33,7 @@ export const PRODUCT_SCOPE = "account";
 export const COMPOSIO_KEY = "COMPOSIO_API_KEY";
 export const COMPOSIO_CALLBACK_PATH = "/oauth/composio/callback";
 export const MCP_CALLBACK_PATH = "/oauth/mcp/callback";
+export const TEAMS_WEBHOOK_PATH = "/inbound/teams";
 
 /** Error constructor with the SDK `TbError` shape; main.ts passes the SDK class so thrown errors map to the envelope. */
 export type ErrorCtor = new (code: string, message: string, httpStatus?: number) => Error;
@@ -56,13 +61,16 @@ export interface ConnectEnv {
   /** Exact origins allowed for catalog/MCP base URLs without the public-address check (tests). */
   catalogAllowOrigins?: readonly string[];
   allowRelayOrigins?: readonly string[];
+  /** Tests: injected chat providers and channel network (production: channelProviders() + pinned fetch + WebSocket). */
+  channelProviders?: Map<ChannelServiceId, ChannelProvider>;
+  channelNet?: ChannelNet;
   /** Manifest setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL; settings reach apps only as env, S6). */
   buzzRelayUrl?: string | null;
 }
 
 /** The SDK passes `SdkOpContext` (publicUrl, workspace, scopes, secrets: C31) where the frozen types say OpContext. */
 const extras = (ctx: OpContext): SdkOpContext => ctx as SdkOpContext;
-type ServiceCtx = { db: Db; getKey(name: string): Promise<string | null>; secrets?: AppSecrets };
+type ServiceCtx = { db: Db; getKey(name: string): Promise<string | null>; secrets?: AppSecrets; log?: Logger };
 
 type Input = Record<string, unknown>;
 const asInput = (value: Json): Input => (value && typeof value === "object" && !Array.isArray(value) ? (value as Input) : {});
@@ -77,6 +85,7 @@ interface Services {
   relay: BuzzRelay;
   catalog: CatalogSource;
   mcp: McpSource;
+  channels: ChannelHub;
 }
 
 export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
@@ -142,7 +151,20 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       fetchImpl: outbound,
       ...(env.catalogAllowOrigins ? { allowOrigins: env.catalogAllowOrigins } : {}),
     });
-    const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp };
+    const channels = new ChannelHub({
+      db,
+      accounts,
+      secrets,
+      providers: env.channelProviders ?? channelProviders(),
+      net: env.channelNet ?? {
+        fetch: outbound,
+        webSocket: (url) => new WebSocket(url),
+        now: () => Date.now(),
+        sleep: (ms, signal) => sleepFor(ms, signal),
+      },
+      ...(ctx.log ? { log: ctx.log } : {}),
+    });
+    const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp, channels };
     cache = { db, services: built };
     return built;
   };
@@ -155,6 +177,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       if (error instanceof NetPolicyError) fail(error.code, error.message, 422);
       if (error instanceof CatalogError) fail(error.code, error.message, error.code === "catalog_app_unknown" || error.code === "tool_unknown" ? 404 : 400);
       if (error instanceof BuzzRefusal) fail(error.code, error.message, error.httpStatus);
+      if (error instanceof ChannelError) fail(error.code, error.message, error.httpStatus);
       if (error instanceof UpstreamError) fail(error.code, error.message.slice(0, 300), error.status && error.status < 500 ? 409 : 502);
       if (error instanceof OAuthError) fail(error.code, error.message, 502);
       if (error instanceof McpError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
@@ -287,12 +310,193 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         const root = str(i.threadRoot);
         ctx.receipt.summary(`Buzz post to channel ${channel.slice(0, 8)}…`);
         ctx.receipt.meta({ subjectKind: "as_itself", channel });
-        return services(ctx).relay.post(ctx.caller.id, {
+        const posted = await services(ctx).relay.post(ctx.caller.id, {
           channel,
           content: String(i.content ?? ""),
           ...(replyTo ? { replyTo: { id: replyTo, ...(root ? { root } : {}) } } : {}),
         });
+        rememberBuzzSent(ctx.db, ctx.caller.id, posted.id, channel);
+        return posted;
       });
+    },
+    async buzz_react(input, ctx) {
+      return guard(async () => {
+        const i = asInput(input);
+        ctx.receipt.summary("Buzz reaction");
+        return services(ctx).relay.react(ctx.caller.id, { channel: String(i.channel ?? ""), messageId: String(i.messageId ?? ""), emoji: String(i.emoji ?? "") });
+      });
+    },
+    async buzz_edit(input, ctx) {
+      return guard(async () => {
+        const i = asInput(input);
+        const channel = String(i.channel ?? "");
+        const messageId = String(i.messageId ?? "");
+        ownBuzzMessage(ctx.db, ctx.caller.id, messageId, fail);
+        ctx.receipt.summary("Buzz message edited");
+        return services(ctx).relay.edit(ctx.caller.id, { channel, messageId, content: String(i.content ?? "") });
+      });
+    },
+    buzz_delete: {
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const channel = String(i.channel ?? "");
+          const messageId = String(i.messageId ?? "");
+          ownBuzzMessage(ctx.db, ctx.caller.id, messageId, fail);
+          const out = await services(ctx).relay.remove(ctx.caller.id, { channel, messageId });
+          ctx.db.prepare("DELETE FROM connect_buzz_sent WHERE agent = ? AND event_id = ?").run(ctx.caller.id, messageId);
+          ctx.receipt.summary("Buzz message deleted");
+          return out;
+        }),
+      holdView: (input) => `Delete your Buzz message ${String(asInput(input).messageId ?? "").slice(0, 12)}… in channel ${String(asInput(input).channel ?? "")}`,
+    },
+    async buzz_schedule(input, ctx) {
+      return guard(async () => {
+        const i = asInput(input);
+        const channel = String(i.channel ?? "");
+        const content = String(i.content ?? "").trim();
+        const sendAt = Date.parse(String(i.sendAt ?? ""));
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(channel)) fail("buzz_channel_invalid", "channel must be a Buzz channel id.");
+        if (!content) fail("buzz_content_invalid", "The message is empty.");
+        if (!Number.isFinite(sendAt) || sendAt < Date.now() + 30_000 || sendAt > Date.now() + 30 * 86_400_000) fail("buzz_send_at_invalid", "sendAt must be an ISO time between 30 seconds and 30 days from now.");
+        if (!services(ctx).buzz.get(ctx.caller.id)) fail("buzz_identity_missing", "You have no Buzz identity yet. Ask the owner to create Buzz identities in Connect.", 409);
+        const id = newId("bsp");
+        ctx.db
+          .prepare("INSERT INTO connect_buzz_scheduled (id, agent, channel, content, send_at, status, created_at) VALUES (?, ?, ?, ?, ?, 'scheduled', ?)")
+          .run(id, ctx.caller.id, channel, content, sendAt, Date.now());
+        ctx.receipt.summary(`Buzz post scheduled for ${new Date(sendAt).toISOString()}`);
+        return { id, sendAt: new Date(sendAt).toISOString() };
+      });
+    },
+    async buzz_scheduled(_input, ctx) {
+      const posts = ctx.db
+        .prepare("SELECT id, channel, send_at, status, event_id, detail FROM connect_buzz_scheduled WHERE agent = ? ORDER BY send_at DESC LIMIT 100")
+        .all(ctx.caller.id)
+        .map((r) => ({ id: String(r.id), channel: String(r.channel), sendAt: new Date(Number(r.send_at)).toISOString(), status: String(r.status), eventId: r.event_id === null ? null : String(r.event_id), detail: String(r.detail) }));
+      return { posts };
+    },
+    async buzz_schedule_cancel(input, ctx) {
+      return guard(async () => {
+        const id = String(asInput(input).id ?? "");
+        const r = ctx.db.prepare("UPDATE connect_buzz_scheduled SET status = 'cancelled' WHERE id = ? AND agent = ? AND status = 'scheduled'").run(id, ctx.caller.id);
+        if (r.changes === 0) fail("buzz_scheduled_unknown", "No scheduled post of yours with that id is waiting.", 404);
+        return { ok: true };
+      });
+    },
+
+    // ── chat channels (agent) ──
+    channel_inbox: {
+      scope: (input) => str(asInput(input).account) ?? null,
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const readable = new Set(await ctx.scope.readable(PRODUCT_SCOPE));
+          const mine = s.accounts
+            .list({ status: "connected" })
+            .filter((a) => a.source === "channel" && a.ownerAgent === ctx.caller.id && readable.has(a.id) && (!str(i.account) || a.id === str(i.account)));
+          const out = s.channels.inbox(mine.map((a) => a.id), typeof i.sinceSeq === "number" ? i.sinceSeq : 0, typeof i.limit === "number" ? i.limit : 50);
+          return { ...out, untrusted: true } as unknown as Json;
+        }),
+    },
+    channel_conversations: {
+      scope: (input) => str(asInput(input).account) ?? null,
+      run: async (input, ctx) =>
+        guard(async () => {
+          const s = services(ctx);
+          const account = s.channels.account(String(asInput(input).account ?? ""), ctx.caller.id);
+          await s.channels.refreshConversations(account).catch(() => undefined);
+          return { conversations: s.channels.conversations(account.id) };
+        }),
+    },
+    channel_send: {
+      scope: (input) => str(asInput(input).account) ?? null,
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          ctx.receipt.summary(`${account.service} post via ${account.label}`);
+          ctx.receipt.meta({ subjectKind: "as_itself", service: account.service, account: account.label });
+          return s.channels.send(account, ctx.caller.id, { conversation: String(i.conversation ?? ""), text: String(i.text ?? ""), threadId: str(i.threadId) ?? null });
+        }),
+      redact: (input) => `Chat post to ${String(asInput(input).conversation ?? "").slice(-40)}`,
+    },
+    channel_reply: {
+      scope: (input) => str(asInput(input).account) ?? null,
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          ctx.receipt.summary(`${account.service} reply via ${account.label}`);
+          ctx.receipt.meta({ subjectKind: "as_itself", service: account.service, account: account.label });
+          return s.channels.reply(account, ctx.caller.id, { seq: Number(i.seq ?? 0), text: String(i.text ?? "") });
+        }),
+    },
+    channel_dm_first: {
+      scope: (input) => str(asInput(input).account) ?? null,
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          ctx.receipt.summary(`First ${account.service} DM via ${account.label}`);
+          ctx.receipt.meta({ subjectKind: "as_itself", service: account.service, person: String(i.person ?? "").slice(-60) });
+          return s.channels.directMessage(account, ctx.caller.id, { person: String(i.person ?? ""), text: String(i.text ?? ""), first: true });
+        }),
+      holdView: (input) => {
+        const i = asInput(input);
+        return `First direct message (chat)\nTo: ${String(i.person ?? "")}\n\n${String(i.text ?? "")}`;
+      },
+    },
+    channel_dm: {
+      scope: (input) => str(asInput(input).account) ?? null,
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          ctx.receipt.summary(`${account.service} DM via ${account.label}`);
+          return s.channels.directMessage(account, ctx.caller.id, { person: String(i.person ?? ""), text: String(i.text ?? ""), first: false });
+        }),
+    },
+    channel_edit: {
+      scope: (input) => str(asInput(input).account) ?? null,
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          await s.channels.edit(account, { conversation: String(i.conversation ?? ""), messageId: String(i.messageId ?? ""), text: String(i.text ?? "") });
+          ctx.receipt.summary(`${account.service} message edited`);
+          return { ok: true };
+        }),
+    },
+    channel_delete: {
+      scope: (input) => str(asInput(input).account) ?? null,
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          await s.channels.delete(account, { conversation: String(i.conversation ?? ""), messageId: String(i.messageId ?? "") });
+          ctx.receipt.summary(`${account.service} message deleted`);
+          return { ok: true };
+        }),
+      holdView: (input) => `Delete your chat message ${String(asInput(input).messageId ?? "")} in ${String(asInput(input).conversation ?? "")}`,
+    },
+    channel_react: {
+      scope: (input) => str(asInput(input).account) ?? null,
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          await s.channels.react(account, { conversation: String(i.conversation ?? ""), messageId: String(i.messageId ?? ""), emoji: String(i.emoji ?? "") });
+          ctx.receipt.summary(`${account.service} reaction`);
+          return { ok: true };
+        }),
     },
 
     buzz_dm_first: {
@@ -302,6 +506,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           const s = services(ctx);
           const sent = await s.relay.directMessage(ctx.caller.id, { to: String(i.to ?? ""), content: String(i.content ?? "") });
           rememberContact(ctx.db, ctx.caller.id, sent);
+          rememberBuzzSent(ctx.db, ctx.caller.id, sent.id, sent.channel);
           ctx.receipt.summary(`First Buzz DM to ${shortKey(sent.to)}`);
           ctx.receipt.meta({ subjectKind: "as_itself", to: sent.to, channel: sent.channel });
           return sent;
@@ -322,6 +527,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           const known = ctx.db.prepare("SELECT 1 FROM connect_buzz_contacts WHERE agent = ? AND pubkey = ?").get(ctx.caller.id, to);
           if (!known) fail("buzz_first_contact_required", "You have not written to this person before. Use buzz_dm_first; the owner approves first contact.", 409);
           const sent = await s.relay.directMessage(ctx.caller.id, { to: to as string, content: String(i.content ?? "") });
+          rememberBuzzSent(ctx.db, ctx.caller.id, sent.id, sent.channel);
           ctx.receipt.summary(`Buzz DM to ${shortKey(sent.to)}`);
           ctx.receipt.meta({ subjectKind: "as_itself", to: sent.to, channel: sent.channel });
           return sent;
@@ -400,6 +606,55 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         return { account: accountView(account) };
       });
     },
+    async catalog_account_test(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const account = s.accounts.get(String(asInput(input).id ?? ""));
+        if (account?.source !== "catalog") fail("account_not_found", "No such self-hosted app account.", 404);
+        return (await s.catalog.test(account as Account)) as unknown as Json;
+      });
+    },
+    async channel_providers(_input, ctx) {
+      return {
+        services: [...(env.channelProviders ?? channelProviders()).values()].map((p) => ({
+          service: p.service,
+          credentialFields: [...p.credentialFields],
+          settingFields: (p.settingFields ?? []).map((f) => ({ ...f })),
+          inbound: p.inbound.kind,
+        })),
+        agents: agentsOf(ctx.db),
+      } as unknown as Json;
+    },
+    async channel_account_connect(input, ctx) {
+      return guard(async () => {
+        const i = asInput(input);
+        const s = services(ctx);
+        const service = String(i.service ?? "");
+        if (!isChannelService(service)) fail("channel_service_unknown", "Pick Slack, Teams, Telegram or Discord.");
+        const agent = str(i.agent) ?? fail("agent_required", "Pick the agent this bot speaks for.");
+        if (!agentsOf(ctx.db).some((a) => a.id === agent)) fail("agent_unknown", "Unknown agent.", 404);
+        const account = await s.channels.connect({
+          service,
+          label: str(i.label) ?? service,
+          agent: agent as string,
+          credentials: (i.credentials && typeof i.credentials === "object" ? i.credentials : {}) as Record<string, unknown>,
+          ...(i.settings && typeof i.settings === "object" ? { settings: i.settings as Record<string, unknown> } : {}),
+        });
+        await extras(ctx).scopes.instances.create(PRODUCT_SCOPE, account.id, account.label, { ownerAgent: agent as `agt_${string}` });
+        return { account: accountView(account) };
+      });
+    },
+    async channel_accounts(_input, ctx) {
+      const s = services(ctx);
+      const accounts = s.accounts
+        .list()
+        .filter((a) => a.source === "channel")
+        .map((a) => {
+          const bot = s.channels.bot(a.id);
+          return { ...accountView(a), bot: bot ? { id: bot.botId, name: bot.botName, inbound: bot.inboundState, detail: bot.inboundDetail } : null };
+        });
+      return { accounts } as unknown as Json;
+    },
     async mcp_account_connect(input, ctx) {
       return guard(async () => {
         const s = services(ctx);
@@ -452,7 +707,9 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
               ? await s.catalog.disconnect(account)
               : account.source === "mcp"
                 ? await s.mcp.disconnect(account)
-                : s.accounts.update(id, { status: "revoked" });
+                : account.source === "channel"
+                  ? await s.channels.disconnect(account)
+                  : s.accounts.update(id, { status: "revoked" });
         return { account: accountView(revoked) };
       });
     },
@@ -539,11 +796,29 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     }
   };
 
+  const teamsWebhook: PublicHandler = async (req, rawCtx) => {
+    const ctx = rawCtx as SdkPublicContext;
+    const body = await req.text();
+    if (body.length > 128 * 1024) return new Response("", { status: 413 });
+    const out = await services(ctx).channels.webhook("teams", { headers: req.headers, body });
+    return new Response(out.body, { status: out.status, headers: { "content-type": out.contentType ?? "text/plain", "cache-control": "no-store" } });
+  };
+
   return {
     manifest: env.manifest,
     handlers,
     dynamic: { tools: dynamicTools },
-    publicRoutes: { [COMPOSIO_CALLBACK_PATH]: composioCallback, [MCP_CALLBACK_PATH]: mcpCallback },
+    publicRoutes: { [COMPOSIO_CALLBACK_PATH]: composioCallback, [MCP_CALLBACK_PATH]: mcpCallback, [TEAMS_WEBHOOK_PATH]: teamsWebhook },
+    onStart: async (ctx) => {
+      const s = services(ctx);
+      s.channels.startAll();
+      const tick = async () => {
+        s.channels.purge();
+        await runDueBuzzPosts(ctx.db, s.relay, ctx.log);
+      };
+      const timer = setInterval(() => void tick().catch((e: unknown) => ctx.log.warn("scheduler tick failed", { code: (e as { code?: string }).code ?? "error" })), 15_000);
+      timer.unref();
+    },
     migrations: env.migrationsDir,
     // connect_agents mirrors slice agents (id, name) because handlers have no slice-agent read in the SDK; Connect needs
     // agent names for Buzz identities and the "as itself" picker (BSA-15: recorded as app data until the SDK exposes them).
@@ -574,6 +849,46 @@ function rememberContact(db: Db, agent: string, sent: { to: string; channel: str
   db.prepare(
     "INSERT INTO connect_buzz_contacts (agent, pubkey, channel, first_sent_at) VALUES (?, ?, ?, ?) ON CONFLICT (agent, pubkey) DO UPDATE SET channel = excluded.channel",
   ).run(agent, pubkey, sent.channel, Date.now());
+}
+
+function rememberBuzzSent(db: Db, agent: string, eventId: string, channel: string): void {
+  db.prepare("INSERT OR IGNORE INTO connect_buzz_sent (agent, event_id, channel, sent_at) VALUES (?, ?, ?, ?)").run(agent, eventId, channel, Date.now());
+}
+
+function ownBuzzMessage(db: Db, agent: string, eventId: string, fail: (code: string, message: string, status?: number) => never): void {
+  if (!db.prepare("SELECT 1 FROM connect_buzz_sent WHERE agent = ? AND event_id = ?").get(agent, eventId)) {
+    fail("buzz_not_own_message", "You can only change messages you posted through Connect.", 403);
+  }
+}
+
+/** Post due scheduled Buzz messages (authorised and receipted when they were scheduled). */
+export async function runDueBuzzPosts(db: Db, relay: BuzzRelay, log: Logger, now = Date.now()): Promise<number> {
+  const due = db.prepare("SELECT id, agent, channel, content FROM connect_buzz_scheduled WHERE status = 'scheduled' AND send_at <= ? ORDER BY send_at LIMIT 20").all(now);
+  let sent = 0;
+  for (const r of due) {
+    const claim = db.prepare("UPDATE connect_buzz_scheduled SET status = 'sent' WHERE id = ? AND status = 'scheduled'").run(String(r.id));
+    if (claim.changes === 0) continue;
+    try {
+      const out = await relay.post(String(r.agent), { channel: String(r.channel), content: String(r.content) });
+      db.prepare("UPDATE connect_buzz_scheduled SET event_id = ? WHERE id = ?").run(out.id, String(r.id));
+      rememberBuzzSent(db, String(r.agent), out.id, String(r.channel));
+      sent += 1;
+    } catch (error) {
+      db.prepare("UPDATE connect_buzz_scheduled SET status = 'failed', detail = ? WHERE id = ?").run(error instanceof Error ? error.message.slice(0, 300) : "failed", String(r.id));
+      log.warn("scheduled buzz post failed", { code: (error as { code?: string }).code ?? "error" });
+    }
+  }
+  return sent;
+}
+
+function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(t);
+      resolve();
+    }, { once: true });
+  });
 }
 
 function shortKey(key: string): string {

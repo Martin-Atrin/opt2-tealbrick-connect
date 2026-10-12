@@ -11,6 +11,7 @@ import {
   accountsOverview,
   accountUpdate,
   agentsList,
+  catalogAccountTest,
   scopesSet,
   toolsRefresh,
 } from "../ops.ts";
@@ -197,12 +198,34 @@ function AccountRow(props: { account: Account; ownerName: string; agents: AgentI
           <Button type="button" variant="secondary" onClick={() => setEditing(true)} aria-label={`Rename ${account.label}`}>
             Rename
           </Button>
+          {account.source === "catalog" && account.status === "connected" ? <TestConnection id={account.id} label={account.label} /> : null}
           <Button type="button" variant="danger" onClick={props.onDisconnect} aria-label={`Disconnect ${account.label}`}>
             Disconnect
           </Button>
         </div>
       ) : null}
       {account.status === "connected" ? <AgentAccess account={account} agents={props.agents} /> : null}
+    </>
+  );
+}
+
+function TestConnection({ id, label }: { id: string; label: string }) {
+  const [state, setState] = useState<{ busy: boolean; text: string | null; error: boolean }>({ busy: false, text: null, error: false });
+  const run = async () => {
+    setState({ busy: true, text: null, error: false });
+    try {
+      const out = await catalogAccountTest(id);
+      setState({ busy: false, text: out.ok ? "Connection works." : out.detail, error: !out.ok });
+    } catch (e) {
+      setState({ busy: false, text: errorText(e), error: true });
+    }
+  };
+  return (
+    <>
+      <Button type="button" variant="secondary" onClick={() => void run()} disabled={state.busy} aria-label={`Test the connection of ${label}`}>
+        Test connection
+      </Button>
+      {state.text ? <span className={state.error ? "inline-error" : "muted"}>{state.text}</span> : null}
     </>
   );
 }
