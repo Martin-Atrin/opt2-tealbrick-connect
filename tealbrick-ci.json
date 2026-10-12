@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-platform/main/ci/tealbrick-ci.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-platform/ci-v5/ci/tealbrick-ci.schema.json",
   "kind": "miniapp",
   "paths": [
     "."
@@ -8,7 +8,7 @@
     {
       "name": "opt2-tealbrick-connect",
       "product": "connect",
-      "productKind": "miniapp",
+      "kind": "app",
       "manifest": "tealbrick.manifest.json"
     }
   ]

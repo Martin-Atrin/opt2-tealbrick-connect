@@ -1,9 +1,9 @@
 import { Button } from "@opt2-tealbrick/ui";
-import { type FormEvent, useEffect, useId, useState } from "react";
+import { useState } from "react";
 
 import { ConfirmDialog, Notice } from "../components.tsx";
 import { copyText, errorText, useLoad } from "../hooks.ts";
-import { type BuzzIdentity, buzzIdentitiesGenerate, buzzIdentitiesList, buzzIdentityRotate, buzzProfilePublish, buzzRelaySet } from "../ops.ts";
+import { type BuzzIdentity, buzzIdentitiesGenerate, buzzIdentitiesList, buzzIdentityRotate, buzzProfilePublish } from "../ops.ts";
 
 function formatCreated(value: number): string {
   const ms = value < 1e12 ? value * 1000 : value;
@@ -12,16 +12,11 @@ function formatCreated(value: number): string {
 
 export function Buzz() {
   const list = useLoad(buzzIdentitiesList);
-  const relayId = useId();
-  const [relay, setRelay] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [rotating, setRotating] = useState<{ agent: string; name: string } | null>(null);
 
   const savedRelay = list.data?.relay ?? "";
-  useEffect(() => {
-    setRelay(savedRelay);
-  }, [savedRelay]);
 
   const rows = list.data?.agents ?? [];
   const withIdentity = rows.filter((r): r is typeof r & { identity: BuzzIdentity } => r.identity !== null);
@@ -58,16 +53,6 @@ export function Buzz() {
       return `Published ${out.published.length} profile${out.published.length === 1 ? "" : "s"} to the relay.`;
     });
 
-  const saveRelay = (event: FormEvent) => {
-    event.preventDefault();
-    const value = relay.trim();
-    if (!value.startsWith("wss://")) return setMessage({ text: "The relay address must start with wss://.", error: true });
-    void run("relay", async () => {
-      const out = await buzzRelaySet(value);
-      return `Relay saved: ${out.relay ?? value}`;
-    });
-  };
-
   const copyAll = async () => {
     const ok = await copyText(withIdentity.map((r) => r.identity.npub).join("\n"));
     setMessage(ok ? { text: `Copied ${withIdentity.length} npub${withIdentity.length === 1 ? "" : "s"}, one per line.`, error: false } : { text: "Copy failed. Select the npubs in the table and copy them by hand.", error: true });
@@ -80,17 +65,9 @@ export function Buzz() {
       {message ? <Notice tone={message.error ? "error" : "info"}>{message.text}</Notice> : null}
       {list.error ? <Notice tone="error">{list.error}</Notice> : null}
 
-      <form className="form" onSubmit={saveRelay}>
-        <div className="field">
-          <label htmlFor={relayId}>Buzz relay address</label>
-          <div className="row">
-            <input id={relayId} className="grow" value={relay} onChange={(e) => setRelay(e.target.value)} placeholder="wss://relay.example.com" inputMode="url" autoComplete="off" spellCheck={false} maxLength={300} />
-            <Button type="submit" variant="secondary" disabled={busy !== null}>
-              Save relay
-            </Button>
-          </div>
-        </div>
-      </form>
+      <p>
+        Relay: {savedRelay ? <code>{savedRelay}</code> : "not set"}. You set the relay address in Teal Brick Portal, in Connect's settings.
+      </p>
 
       <div className="row actions">
         <Button type="button" variant="primary" disabled={busy !== null || rows.length === 0} onClick={() => void generate()}>
@@ -103,7 +80,7 @@ export function Buzz() {
           type="button"
           variant="secondary"
           disabled={busy !== null || withIdentity.length === 0 || !savedRelay}
-          title={savedRelay ? undefined : "Save the relay address first"}
+          title={savedRelay ? undefined : "Set the relay address in Connect's settings in Portal first"}
           onClick={() => void publish()}
         >
           Publish profiles

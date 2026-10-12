@@ -39,6 +39,7 @@ export default async function start(env: Record<string, string>): Promise<{ url:
     ErrorClass: TbError,
     fetchImpl: relayFetch,
     allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP],
+    buzzRelayUrl: TEST_RELAY,
   });
   // Ensure the calling agent has an identity before buzz_post runs (ctx.secrets exists only per call).
   const post = definition.handlers.buzz_post;
@@ -48,8 +49,7 @@ export default async function start(env: Record<string, string>): Promise<{ url:
       ...definition.handlers,
       buzz_post: async (input, ctx) => {
         const sdkCtx = ctx as typeof ctx & { secrets: AppSecrets };
-        const buzz = new BuzzIdentities({ db: ctx.db, secrets: sdkCtx.secrets, allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP], fetchImpl: relayFetch });
-        if (!buzz.relayUrl()) await buzz.setRelayUrl(TEST_RELAY);
+        const buzz = new BuzzIdentities({ db: ctx.db, secrets: sdkCtx.secrets, relayUrl: TEST_RELAY, allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP], fetchImpl: relayFetch });
         await buzz.generateAll([{ id: ctx.caller.id, name: ctx.caller.name }]);
         if (typeof post !== "function") throw new TbError("handler_missing", "buzz_post handler missing", 500);
         return post(input, ctx);

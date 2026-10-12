@@ -1,7 +1,7 @@
 /**
  * One Buzz (Nostr) identity per agent, "as itself" (journey J3, DECISION-LOG C12/C22).
  * - ONE owner action generates keys for every agent of the workspace that has none (all-or-nothing transaction).
- * - The secret key is sealed in `connect_secrets` under `buzz:<agent>`; it is never shown, exported, logged or
+ * - The secret key is held in the SDK app secrets (ctx.secrets, C31) under `buzz:<agent>`; it is never shown, exported, logged or
  *   returned. There is no import. The owner sees npubs and copies them into Buzz (add agents to channels there).
  * - Rotation replaces the key (the old one is gone). Removing an identity deletes the sealed key.
  * - Optional: publish a kind 0 profile ({name, display_name, about}) to the configured relay over the relay's
@@ -15,7 +15,6 @@ import { type FetchLike, requestJson } from "../../util/http.ts";
 import { assertEndpointAllowed, type Lookup } from "../../util/net-policy.ts";
 import { generateSecretKey, nip98Header, npubEncode, publicKeyOf, signEvent } from "./nostr.ts";
 
-export const RELAY_SETTING = "buzz.relay_url";
 const SECRET_PREFIX = "buzz:";
 const NAME_MAX = 80;
 
@@ -35,6 +34,8 @@ export type BuzzIdentityView = {
 
 export interface BuzzDeps {
   db: Db;
+  /** Value of the manifest setting `buzz_relay_url` (owner sets it in Portal; reaches the app as env, S6). */
+  relayUrl?: string | null;
   secrets: AppSecrets;
   fetchImpl?: FetchLike;
   lookup?: Lookup;
@@ -144,21 +145,10 @@ export class BuzzIdentities {
     this.#d.db.prepare("DELETE FROM connect_buzz_identities WHERE agent = ?").run(agent);
   }
 
+  /** The relay from the manifest setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL, set in Portal); normalized. */
   relayUrl(): string | null {
-    const row = this.#d.db.prepare("SELECT value FROM connect_settings WHERE key = ?").get(RELAY_SETTING);
-    return row ? String(row.value) : null;
-  }
-
-  async setRelayUrl(value: string): Promise<string> {
-    const relay = normalizeRelayUrl(value, this.#d.allowRelayOrigins);
-    await assertEndpointAllowed(relay, { schemes: ["wss:"], ...this.#policy() });
-    this.#d.db
-      .prepare(
-        `INSERT INTO connect_settings (key, value, updated_at) VALUES (?, ?, ?)
-         ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-      )
-      .run(RELAY_SETTING, relay, this.#now());
-    return relay;
+    const raw = this.#d.relayUrl?.trim();
+    return raw ? normalizeRelayUrl(raw, this.#d.allowRelayOrigins) : null;
   }
 
   #policy(): { allowOrigins?: readonly string[]; lookup?: Lookup } {

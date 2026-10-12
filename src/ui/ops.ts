@@ -1,4 +1,8 @@
-/** Typed wrappers over `callOp` for the Connect person operations (outputs follow the handlers in `src/app.ts`). */
+/**
+ * Typed wrappers over `callOp` for the Connect person operations. The manifest declares person-op outputs as open
+ * objects and tb-gen kit covers agent ops only, so these output types follow the handlers in `src/app.ts`
+ * (REQUESTS `## connect: tb-gen person-op types`). Which ops need an idempotency key is NOT copied here (sdk.ts).
+ */
 import { callOp, type Json } from "./sdk.ts";
 
 export type AccountKind = "as_me" | "as_itself";
@@ -63,7 +67,6 @@ export const toolsRefresh = (service: string) => callOp<{ service: string; tools
 export const buzzIdentitiesList = () => callOp<{ relay: string | null; agents: BuzzAgentRow[] }>("buzz_identities_list", {});
 export const buzzIdentitiesGenerate = () => callOp<{ created: BuzzIdentity[]; existing: BuzzIdentity[] }>("buzz_identities_generate", {});
 export const buzzIdentityRotate = (agent: string) => callOp<{ identity: BuzzIdentity }>("buzz_identity_rotate", { agent });
-export const buzzRelaySet = (relayUrl: string) => callOp<{ relay: string | null }>("buzz_relay_set", { relayUrl });
 export const buzzProfilePublish = (agent?: string) => callOp<{ published: Json[] }>("buzz_profile_publish", agent ? { agent } : {});
 
 export interface AgentInfo {

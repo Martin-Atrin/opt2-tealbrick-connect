@@ -1,31 +1,29 @@
-# Connect miniapp image. Built from source by CI / Railway (C20). Node 24 runs the TypeScript sources directly.
-# Stage 1 builds the person UI (Vite, src/ui -> dist/ui). Stage 2 is the runtime image.
-FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS ui-build
+# Connect app image (SDK-API §15, C53 BSA-06: the template pattern). Base pinned by digest: node:24-slim.
+# Bump the tag and the digest together; CI pins the built image by digest in the release record.
 
-WORKDIR /build
-COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
-COPY vite.config.ts ./
-COPY src/ui ./src/ui
-RUN npm run build
+FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build
+WORKDIR /app
+ENV CI=true COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY tsconfig.json tsconfig.build.json tealbrick.manifest.json ./
+COPY scripts ./scripts
+COPY src ./src
+RUN pnpm run build && pnpm prune --prod
 
 FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
-
-ENV NODE_ENV=production
 WORKDIR /app
-
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
-
-COPY tealbrick.manifest.json ./
+ENV NODE_ENV=production
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY package.json tealbrick.manifest.json ./
 COPY migrations ./migrations
 COPY policies ./policies
-COPY skills ./skills
-COPY src ./src
-COPY --from=ui-build /build/dist/ui ./dist/ui
-
-RUN mkdir -p /data /backup && chown -R node:node /data /backup
+# Standard manifest location in every opt2 image (tb-exec default --manifest path).
+COPY tealbrick.manifest.json /opt/tb/tealbrick.manifest.json
+# Data volume mount point (manifest runtime.volumes "data"); TB_DATA_DIR=/data, TB_BACKUP_DIR=/data/backup (C28).
+RUN mkdir -p /data/backup && chown -R node:node /data
 USER node
-
 EXPOSE 8314
-CMD ["node", "src/main.ts"]
+CMD ["node", "dist/main.js"]

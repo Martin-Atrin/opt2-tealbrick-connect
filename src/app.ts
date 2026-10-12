@@ -54,6 +54,8 @@ export interface ConnectEnv {
   /** Exact origins allowed for catalog/MCP base URLs without the public-address check (tests). */
   catalogAllowOrigins?: readonly string[];
   allowRelayOrigins?: readonly string[];
+  /** Manifest setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL; settings reach apps only as env, S6). */
+  buzzRelayUrl?: string | null;
 }
 
 /** The SDK passes `SdkOpContext` (publicUrl, workspace, scopes, secrets: C31) where the frozen types say OpContext. */
@@ -113,6 +115,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     const buzz = new BuzzIdentities({
       db,
       secrets,
+      relayUrl: env.buzzRelayUrl ?? null,
       ...(env.fetchImpl ? { fetchImpl: env.fetchImpl } : {}),
       ...(env.allowRelayOrigins ? { allowRelayOrigins: env.allowRelayOrigins } : {}),
     });
@@ -445,12 +448,6 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         return { identity: await s.buzz.rotate(agent) };
       });
     },
-    async buzz_relay_set(input, ctx) {
-      return guard(async () => {
-        const s = services(ctx);
-        return { relay: await s.buzz.setRelayUrl(String(asInput(input).relayUrl ?? "")) };
-      });
-    },
     async buzz_profile_publish(input, ctx) {
       return guard(async () => {
         const s = services(ctx);
@@ -507,6 +504,8 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     dynamic: { tools: dynamicTools },
     publicRoutes: { [COMPOSIO_CALLBACK_PATH]: composioCallback, [MCP_CALLBACK_PATH]: mcpCallback },
     migrations: env.migrationsDir,
+    // connect_agents mirrors slice agents (id, name) because handlers have no slice-agent read in the SDK; Connect needs
+    // agent names for Buzz identities and the "as itself" picker (BSA-15: recorded as app data until the SDK exposes them).
     events: {
       async agentAdded(agent, ctx) {
         ctx.db

@@ -20,6 +20,7 @@ const running = await startApp(
       manifest,
       migrationsDir: join(root, "migrations"),
       dataDir: process.env.TB_DATA_DIR ?? "/data",
+      buzzRelayUrl: process.env.CONNECT_BUZZ_RELAY_URL ?? null,
       ErrorClass: TbError,
     }),
   ),

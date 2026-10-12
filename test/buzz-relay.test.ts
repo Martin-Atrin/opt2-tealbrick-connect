@@ -41,6 +41,7 @@ async function setup() {
     },
   });
   const identities = new BuzzIdentities({
+    relayUrl: "wss://relay.test.example",
     db,
     secrets: memorySecrets(),
     fetchImpl: relay.impl,
@@ -69,13 +70,11 @@ function metaEvent(id: string, name: string, flags: string[][]) {
 
 test("channels: only channels whose member list names the agent", async () => {
   const s = await setup();
-  await s.identities.setRelayUrl("wss://relay.test.example");
   assert.deepEqual(await s.relay.channels("agt_A"), [{ id: CHANNEL, name: "general", type: "channel" }]);
 });
 
 test("read: forged and off-channel events dropped, bidi stripped", async () => {
   const s = await setup();
-  await s.identities.setRelayUrl("wss://relay.test.example");
   const messages = await s.relay.read("agt_A", { channel: CHANNEL, since: 50 });
   assert.equal(messages.length, 1);
   assert.equal(messages[0]?.content, "hello agent");
@@ -85,7 +84,6 @@ test("read: forged and off-channel events dropped, bidi stripped", async () => {
 
 test("post: kind 9 signed by the agent with h tag and NIP-10 reply tags", async () => {
   const s = await setup();
-  await s.identities.setRelayUrl("wss://relay.test.example");
   const root = "a".repeat(64);
   const reply = "b".repeat(64);
   const out = await s.relay.post("agt_A", { channel: CHANNEL, content: "on it", replyTo: { id: reply, root } });

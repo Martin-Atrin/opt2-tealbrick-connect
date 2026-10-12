@@ -13,7 +13,7 @@ export const root = join(import.meta.dirname, "..");
 export function testDb(): Db {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys = ON");
-  db.exec(readFileSync(join(root, "migrations", "0001_init.sql"), "utf8"));
+  for (const file of ["0001_init.sql", "0002_drop_unused_tables.sql"]) db.exec(readFileSync(join(root, "migrations", file), "utf8"));
   return {
     exec: (sql) => db.exec(sql),
     prepare: (sql) => {

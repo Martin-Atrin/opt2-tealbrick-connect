@@ -34,7 +34,7 @@ const origins = [new URL(relayUrl).origin, new URL(httpBase).origin];
 
 function memoryDb(): Db {
   const db = new DatabaseSync(":memory:");
-  db.exec(readFileSync(join(import.meta.dirname, "..", "migrations", "0001_init.sql"), "utf8"));
+  for (const f of ["0001_init.sql", "0002_drop_unused_tables.sql"]) db.exec(readFileSync(join(import.meta.dirname, "..", "migrations", f), "utf8"));
   return {
     exec: (sql) => db.exec(sql),
     prepare: (sql) => {
@@ -61,7 +61,7 @@ function memoryDb(): Db {
 
 const store = new Map<string, string>();
 const secrets = { put: async (n: string, v: string) => void store.set(n, v), get: async (n: string) => store.get(n) ?? null, delete: async (n: string) => void store.delete(n) };
-const identities = new BuzzIdentities({ db: memoryDb(), secrets, allowRelayOrigins: origins });
+const identities = new BuzzIdentities({ db: memoryDb(), secrets, relayUrl, allowRelayOrigins: origins });
 const relay = new BuzzRelay(identities);
 
 /** The test owner signs group admin kinds directly (Connect's allowlist never signs them). */
@@ -97,7 +97,7 @@ try {
     if (r.created.length !== n) throw new Error(`created ${r.created.length} of ${n}`);
     return `${n} identities in ${Date.now() - t0} ms`;
   });
-  await step("relay set", async () => identities.setRelayUrl(relayUrl));
+  await step("relay from setting", async () => identities.relayUrl() ?? "not set");
   await step("kind 0 profiles published", async () => {
     for (const a of agents) await identities.publishProfile(a.id);
     return `${n} profiles`;

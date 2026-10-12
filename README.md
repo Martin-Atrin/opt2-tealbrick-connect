@@ -36,13 +36,13 @@ New code is TypeScript (Node 24+). Swift only where the macOS app requires it.
 | `src/channels/buzz/` | One Buzz (Nostr) identity per agent, created for all agents in one owner action; sealed keys; allowlisted signing. |
 | `src/secrets.ts` | Sealed app secrets (AES-256-GCM, AAD = name). |
 | `scripts/catalog-build.ts` | Builds the Tealbrick catalog artifact (sha256-pinned, scrubbed) attached to a GitHub release. |
-| `scripts/conformance.ts` | Interim conformance until the released suite exists. |
+| `scripts/conformance.ts` | Connect checks the real suite does not cover (app files, Composio policies); `pnpm conformance` runs `tb-conformance app` first. |
 
 ## Develop
 
 ```sh
-npm ci
-npm run typecheck && npm run lint && npm test && npm run conformance
+pnpm install
+pnpm typecheck && pnpm lint && pnpm test && pnpm build && pnpm gen && pnpm conformance
 ```
 
-Node 24 runs the TypeScript sources directly (`node src/main.ts`). The app starts only on `@opt2-tealbrick/miniapp-sdk`.
+The image follows the template pattern (tsc to `dist/`, pnpm, manifest at `/opt/tb`); `node src/main.ts` runs the sources directly for development. The app starts only on `@opt2-tealbrick/miniapp-sdk`.

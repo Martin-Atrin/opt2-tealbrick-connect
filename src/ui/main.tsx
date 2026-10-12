@@ -1,21 +1,55 @@
-import { TbProvider } from "@opt2-tealbrick/miniapp-sdk/client";
+// UI entry: served by the SDK from dist/ui under /a/connect/ behind the person session (SDK-API §3.2, §14).
+import { TbProvider, useSession } from "@opt2-tealbrick/miniapp-sdk/client";
+import { AppShell, BrandMark, STANDARD_PAGES } from "@opt2-tealbrick/ui";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { Layout } from "./Layout.tsx";
+
+import { Notice } from "./components.tsx";
 import { Accounts } from "./pages/Accounts.tsx";
 import { Buzz } from "./pages/Buzz.tsx";
 import { Services } from "./pages/Services.tsx";
-import { useRoute } from "./router.ts";
-import "@opt2-tealbrick/ui/tokens.css";
-import "@opt2-tealbrick/ui/components.css";
-import "./app.css";
+import { Agents, Backups, Holds, Keys, Receipts } from "./pages/Standard.tsx";
+import { ROUTES, type Route, useRoute } from "./router.ts";
+
+const PAGES = [{ id: "services", label: "Services" }, { id: "accounts", label: "Accounts" }, { id: "buzz", label: "Buzz" }, ...STANDARD_PAGES];
+
+function Page({ route, go }: { route: Route; go(route: Route): void }) {
+  switch (route) {
+    case "services":
+      return <Services onOpenAccounts={() => go("accounts")} />;
+    case "accounts":
+      return <Accounts />;
+    case "buzz":
+      return <Buzz />;
+    case "holds":
+      return <Holds />;
+    case "receipts":
+      return <Receipts />;
+    case "agents":
+      return <Agents />;
+    case "keys":
+      return <Keys />;
+    case "backups":
+      return <Backups />;
+  }
+}
 
 function App() {
   const [route, go] = useRoute();
+  const session = useSession();
   return (
-    <Layout route={route} onNavigate={go}>
-      {route === "services" ? <Services onOpenAccounts={() => go("accounts")} /> : route === "accounts" ? <Accounts /> : <Buzz />}
-    </Layout>
+    <AppShell
+      title="Connect"
+      icon={<BrandMark size={22} />}
+      pages={PAGES}
+      current={route}
+      onNavigate={(id) => {
+        if ((ROUTES as readonly string[]).includes(id)) go(id as Route);
+      }}
+      banner={session.status === "signed_out" ? <Notice tone="error">Your session ended. Open Connect again from Teal Brick Portal.</Notice> : undefined}
+    >
+      <Page route={route} go={go} />
+    </AppShell>
   );
 }
 

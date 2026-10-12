@@ -36,3 +36,4 @@ secrets/
 
 # docs CLI session scratch
 .docs-session/
+gen/

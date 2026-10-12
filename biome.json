@@ -7,10 +7,10 @@
       "src/**/*.tsx",
       "test/**/*.ts",
       "scripts/**/*.ts",
-      "vite.config.ts",
       "!**/node_modules",
       "!**/dist",
-      "!**/.tb-ci"
+      "!**/.tb-ci",
+      "!**/gen"
     ]
   },
   "formatter": {
