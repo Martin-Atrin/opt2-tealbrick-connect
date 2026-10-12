@@ -1,9 +1,0 @@
-{
-  "https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.1.1/opt2-tealbrick-ui-0.1.1.tgz": "sha512-EPUHP32//N5WKpQWu7ULt/8yy8pAjPX1P0IWLj37BtZO1KnOr0M4P1muhCXvaNUsjopR5bwDhMjndb49LcvtDg==",
-  "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.2/opt2-tealbrick-conformance-0.1.2.tgz": "sha512-K7oqowvMwzj+M075a18IN06+0gKh6T9cfO6Kq92SjemG+/yxWtkYvDqOv96y16bjvMzSnb1Kdwd/aRN4TfESvw==",
-  "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.3/opt2-tealbrick-manifest-0.1.3.tgz": "sha512-ueaiyKWlnjyW+JXHX52NlFIxBPaC6OTizIMKyDhJZrH/nd3vSvNjdSiJ7dpXd8xNDw7XP11aI0DKK8wEl6tFTQ==",
-  "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.5/opt2-tealbrick-miniapp-sdk-0.1.5.tgz": "sha512-wAjWYyZD3lbzy2Y/zHftLzPx8ClhkO9UyJTtI71z/rrvmIkvoHkLhEUTrAwi+nR0tTb22vjO3mBkcELsIqrPeQ==",
-  "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz": "sha512-CxfkZeS6QGNfT4zm4c1vtPBTHGX8dbC4W0KyJCdF0uRxIE+dxCYHZI1dwonmUH3S1nfYpPrW+JsIQQ6wBqRXfQ==",
-  "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.5/opt2-tealbrick-spec-0.1.5.tgz": "sha512-o+gOKIhTa076Ec5569EBVlfY8KDKfHvlaobxkhML4gL6oczvxho6xb6vgymkmmgzdPnO8AldDbOD05ElEX/6wA==",
-  "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.6/opt2-tealbrick-spec-0.1.6.tgz": "sha512-mHZ6/hejAMqEAo6mjCUYtqdItWWwI7e2aRv1gnO+Cgfg5akvrcsI6Z65Ao+eUortAL7oTWzoMvG4SZJLxaYMQA=="
-}
