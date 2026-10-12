@@ -94,7 +94,9 @@ test("J1: connect two Gmail inboxes, verified callback, user_id = workspace id, 
   assert.equal(two.response?.status, 200);
   const links = s.upstream.calls.filter((c) => c.url.pathname.endsWith("/connected_accounts/link"));
   assert.deepEqual(links.map((c) => (c.body as { user_id: string }).user_id), [WS, WS]);
-  assert.deepEqual(links.map((c) => (c.body as { alias: string }).alias), ["Work inbox", "Private inbox"]);
+  const aliases = links.map((c) => (c.body as { alias: string }).alias);
+  assert.match(aliases[0] ?? "", /^Work inbox-[0-9a-f]{6}$/u);
+  assert.match(aliases[1] ?? "", /^Private inbox-[0-9a-f]{6}$/u);
   for (const call of s.upstream.calls) {
     assert.equal(call.url.hostname, "backend.composio.dev");
     assert.equal(call.headers.get("x-api-key"), KEY);

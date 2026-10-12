@@ -29,15 +29,40 @@ export function allowedComposioOrigin(value: string, extraOrigins: readonly stri
   return extraOrigins.includes(url.origin);
 }
 
+/** What Composio (or the network) answered, for log lines only. Never shown to the person. */
+export interface UpstreamDetail {
+  code: string;
+  status: number | null;
+  /** Redacted, truncated upstream text. */
+  detail: string;
+}
+
 export class ComposioError extends Error {
   readonly code: string;
   readonly status: number;
-  constructor(code: string, message: string, status = 502) {
+  /** Set when the error came from an upstream answer: the log line carries it, the message stays plain. */
+  readonly upstream: UpstreamDetail | undefined;
+  constructor(code: string, message: string, status = 502, upstream?: UpstreamDetail) {
     super(message);
     this.name = "ComposioError";
     this.code = code;
     this.status = status;
+    this.upstream = upstream;
   }
+}
+
+/** Plain text for the person; the raw upstream answer goes to the log only. */
+const PLAIN_UPSTREAM: Record<string, string> = {
+  composio_key_rejected: "Composio rejected the API key. Check the key on the workspace key page.",
+  composio_not_found: "Composio does not know that item.",
+  composio_timeout: "Composio took too long to answer. Try again.",
+  composio_unreachable: "Composio could not be reached. Try again.",
+  composio_response_too_large: "Composio sent an answer that was too large. Try again.",
+};
+const PLAIN_UPSTREAM_DEFAULT = "Composio could not finish that request. Try again.";
+
+export function isAliasCollision(upstream: UpstreamDetail | undefined): boolean {
+  return upstream !== undefined && (upstream.status === 400 || upstream.status === 409) && /alias/iu.test(upstream.detail) && /already in use|already exists/iu.test(upstream.detail);
 }
 
 export interface ComposioToolkit {
@@ -197,7 +222,14 @@ export class ComposioClient {
     } catch (error) {
       if (error instanceof UpstreamError) {
         const code = error.code === "upstream_unauthorized" ? "composio_key_rejected" : error.code.replace(/^upstream_/u, "composio_");
-        throw new ComposioError(code, error.message, error.code === "upstream_unauthorized" ? 401 : 502);
+        const upstream: UpstreamDetail = { code: error.code, status: error.status, detail: error.message.slice(0, 1000) };
+        const collision = isAliasCollision(upstream);
+        throw new ComposioError(
+          collision ? "composio_alias_in_use" : code,
+          collision ? "That sign-in could not start. Try again." : (PLAIN_UPSTREAM[code] ?? PLAIN_UPSTREAM_DEFAULT),
+          error.code === "upstream_unauthorized" ? 401 : 502,
+          upstream,
+        );
       }
       throw error;
     }

@@ -133,6 +133,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       tools,
       policies,
       client: () => composioClient(getKey),
+      ...(ctx.log ? { log: ctx.log } : {}),
     });
     const buzz = new BuzzIdentities({
       db,

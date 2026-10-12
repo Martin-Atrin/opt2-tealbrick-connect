@@ -4,7 +4,9 @@
  * connected account id. Composio `user_id` = the workspace id (DECISION-LOG C12).
  */
 
-import type { Db } from "@opt2-tealbrick/spec/sdk";
+import { randomBytes } from "node:crypto";
+
+import type { Db, Logger } from "@opt2-tealbrick/spec/sdk";
 import type { Account, AccountStore, ConnectionKind } from "../../accounts.ts";
 import { entrySchema, type ToolRegistry, toolName } from "../../tools.ts";
 import { randomToken, sha256Hex } from "../../util/ids.ts";
@@ -12,6 +14,19 @@ import { type ComposioClient, ComposioError, type ComposioToolkit, OWNER_CONFIGU
 import { type ComposioPolicy, classifyComposioTool } from "./policy.ts";
 
 export const STATE_TTL_MS = 30 * 60 * 1000;
+/** A pending sign-in older than this is "stale": the next attempt may delete it at Composio (never an ACTIVE one). */
+export const STALE_PENDING_MS = 10 * 60 * 1000;
+/** Composio refuses a second alias with the same text for one user, so every attempt gets its own suffix. */
+const ALIAS_ATTEMPTS = 3;
+const ALIAS_LABEL_MAX = 40;
+export const START_FAILED_MESSAGE = "That sign-in could not start. Try again.";
+
+/** The Composio alias for one attempt: the person's label plus a short unique suffix. The label field stays ours. */
+export function composioAlias(label: string, suffix: string): string {
+  return `${label.slice(0, ALIAS_LABEL_MAX).trim()}-${suffix}`;
+}
+
+const randomSuffix = (): string => randomBytes(3).toString("hex");
 
 /** How a toolkit can be connected, derived once on the server (harvest: v1 connect-mode.ts). */
 export type ConnectMode = "no_auth" | "ready_managed" | "ready_user_key" | "needs_auth_config" | "not_supported";
@@ -32,6 +47,9 @@ export interface ComposioDeps {
   /** Built from the current key (app-own > workspace default); throws ComposioError("composio_key_missing") when absent. */
   client(): Promise<ComposioClient>;
   now?: () => number;
+  log?: Logger;
+  /** Alias suffix source (tests). */
+  suffix?: () => string;
 }
 
 export class ComposioSource {
@@ -45,6 +63,53 @@ export class ComposioSource {
     return this.#d.now ? this.#d.now() : Date.now();
   }
 
+  /** Log an upstream failure (code, status, redacted text) for the operator; the person gets the plain message only. */
+  #logUpstream(op: string, error: unknown): void {
+    if (!(error instanceof ComposioError)) return;
+    this.#d.log?.warn("composio upstream error", {
+      op,
+      code: error.code,
+      upstreamCode: error.upstream?.code ?? null,
+      upstreamStatus: error.upstream?.status ?? null,
+      detail: error.upstream?.detail ?? error.message,
+    });
+  }
+
+  /**
+   * Before a new attempt: delete OUR OWN stale sign-ins for this toolkit at Composio. Only Connect's own pending
+   * rows (never ACTIVE upstream, never a row Connect did not create), only older than STALE_PENDING_MS.
+   * Best effort: a failure is logged and never blocks the new attempt.
+   */
+  async #cleanupStale(client: ComposioClient, service: string, workspaceId: string): Promise<void> {
+    const cutoff = this.#now() - STALE_PENDING_MS;
+    const stale = this.#d.accounts
+      .list({ service, status: "pending" })
+      .filter((a) => a.source === "composio" && a.externalRef !== null && a.createdAt <= cutoff);
+    for (const account of stale) {
+      const ref = account.externalRef as string;
+      try {
+        const upstream = await client.getConnectedAccount(ref).catch((error: unknown) => {
+          if (error instanceof ComposioError && error.code === "composio_not_found") return null;
+          throw error;
+        });
+        if (upstream !== null) {
+          const foreign =
+            (upstream.userId !== null && upstream.userId !== workspaceId) || (upstream.toolkit !== null && upstream.toolkit !== service);
+          if (upstream.status === "ACTIVE" || foreign) {
+            this.#d.log?.info("composio stale sign-in kept", { service, account: account.id, ref, status: upstream.status, foreign });
+            continue;
+          }
+          await client.deleteConnectedAccount(ref);
+        }
+        this.#d.accounts.update(account.id, { status: "failed", detail: "Replaced by a newer sign-in attempt." }, this.#now());
+        this.#d.log?.info("composio stale sign-in deleted", { service, account: account.id, ref, upstreamStatus: upstream?.status ?? "gone" });
+      } catch (error) {
+        this.#d.log?.warn("composio stale sign-in cleanup failed", { service, account: account.id, ref });
+        this.#logUpstream("cleanup_stale", error);
+      }
+    }
+  }
+
   /** Step 1 of "Connect": create a pending account and return Composio's hosted sign-in URL for the popup. */
   async startConnect(input: {
     service: string;
@@ -55,11 +120,19 @@ export class ComposioSource {
     callbackUrl: string;
   }): Promise<{ account: Account; redirectUrl: string }> {
     const client = await this.#d.client();
-    const toolkit = await client.getToolkit(input.service);
-    const mode = connectMode(toolkit);
-    if (mode === "no_auth") throw new ComposioError("composio_toolkit_no_auth", `${toolkit.name} needs no sign-in.`, 409);
-    if (mode === "not_supported") throw new ComposioError("composio_toolkit_not_supported", `${toolkit.name} cannot be connected through Composio yet.`, 409);
-    const authConfigId = await client.getOrCreateAuthConfig(toolkit);
+    let toolkit: ComposioToolkit;
+    let authConfigId: string;
+    try {
+      toolkit = await client.getToolkit(input.service);
+      const mode = connectMode(toolkit);
+      if (mode === "no_auth") throw new ComposioError("composio_toolkit_no_auth", `${toolkit.name} needs no sign-in.`, 409);
+      if (mode === "not_supported") throw new ComposioError("composio_toolkit_not_supported", `${toolkit.name} cannot be connected through Composio yet.`, 409);
+      authConfigId = await client.getOrCreateAuthConfig(toolkit);
+    } catch (error) {
+      this.#logUpstream("start_connect", error);
+      throw this.#plainStartError(error);
+    }
+    await this.#cleanupStale(client, toolkit.slug, input.workspaceId);
     const account = this.#d.accounts.create({
       service: toolkit.slug,
       source: "composio",
@@ -76,19 +149,38 @@ export class ComposioSource {
     const callback = new URL(input.callbackUrl);
     callback.searchParams.set("state", state);
     try {
-      const link = await client.createLink({
-        authConfigId,
-        userId: input.workspaceId,
-        alias: account.label,
-        callbackUrl: callback.toString(),
-        state,
-      });
+      let link: { connectedAccountId: string | null; redirectUrl: string } | null = null;
+      for (let attempt = 1; link === null; attempt += 1) {
+        try {
+          link = await client.createLink({
+            authConfigId,
+            userId: input.workspaceId,
+            alias: composioAlias(account.label, (this.#d.suffix ?? randomSuffix)()),
+            callbackUrl: callback.toString(),
+            state,
+          });
+        } catch (error) {
+          // A leftover alias at Composio must never block the person: retry with a fresh suffix.
+          if (!(error instanceof ComposioError) || error.code !== "composio_alias_in_use" || attempt >= ALIAS_ATTEMPTS) throw error;
+          this.#logUpstream("create_link_alias_retry", error);
+        }
+      }
       const updated = this.#d.accounts.update(account.id, { externalRef: link.connectedAccountId }, this.#now());
       return { account: updated, redirectUrl: link.redirectUrl };
     } catch (error) {
-      this.#d.accounts.update(account.id, { status: "failed", detail: error instanceof Error ? error.message : String(error) }, this.#now());
-      throw error;
+      this.#logUpstream("create_link", error);
+      const plain = this.#plainStartError(error);
+      this.#d.accounts.update(account.id, { status: "failed", detail: plain.message }, this.#now());
+      throw plain;
     }
+  }
+
+  /** Upstream failures while starting a sign-in become one plain message; typed owner errors (key, toolkit) stay as they are. */
+  #plainStartError(error: unknown): Error {
+    if (error instanceof ComposioError && error.upstream && error.code !== "composio_key_rejected") {
+      return new ComposioError("composio_connect_start_failed", START_FAILED_MESSAGE, 502);
+    }
+    return error instanceof Error ? error : new Error(String(error));
   }
 
   /**
@@ -116,7 +208,10 @@ export class ComposioSource {
       throw new ComposioError("composio_account_mismatch", "The callback named a different connected account.", 400);
     }
     const client = await this.#d.client();
-    const upstream = await client.getConnectedAccount(upstreamId);
+    const upstream = await client.getConnectedAccount(upstreamId).catch((error: unknown) => {
+      this.#logUpstream("callback_get_account", error);
+      throw error;
+    });
     const problems = [
       upstream.status !== "ACTIVE" ? `status ${upstream.status}` : null,
       upstream.toolkit && upstream.toolkit !== account.service ? "toolkit mismatch" : null,
@@ -135,7 +230,10 @@ export class ComposioSource {
   /** Load the toolkit's tools, classify each with the policy (or name inference), replace the registry rows. */
   async syncTools(service: string): Promise<number> {
     const client = await this.#d.client();
-    const tools = await client.listTools(service);
+    const tools = await client.listTools(service).catch((error: unknown) => {
+      this.#logUpstream("sync_tools", error);
+      throw error;
+    });
     const policy = this.#d.policies.get(service);
     return this.#d.tools.replaceService(
       "composio",
@@ -157,7 +255,12 @@ export class ComposioSource {
       throw new ComposioError("account_not_connected", "This account is not connected.", 409);
     }
     const client = await this.#d.client();
-    const result = await client.executeTool({ slug: upstreamSlug, userId: workspaceId, connectedAccountId: account.externalRef, arguments: args });
+    const result = await client
+      .executeTool({ slug: upstreamSlug, userId: workspaceId, connectedAccountId: account.externalRef, arguments: args })
+      .catch((error: unknown) => {
+        this.#logUpstream("execute", error);
+        throw error;
+      });
     if (!result.successful) throw new ComposioError("composio_tool_failed", result.error ?? "The tool call failed.", 502);
     return result.data;
   }
