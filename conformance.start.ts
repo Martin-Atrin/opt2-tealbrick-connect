@@ -41,7 +41,7 @@ export default async function start(env: Record<string, string>): Promise<{ url:
     ErrorClass: TbError,
     fetchImpl: relayFetch,
     allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP],
-    buzzRelayUrl: TEST_RELAY,
+    buzzRelays: TEST_RELAY,
   });
   // Ensure the calling agent has an identity before a Buzz op runs (ctx.secrets exists only per call).
   type AnyHandler = (typeof definition.handlers)[string];
@@ -50,7 +50,7 @@ export default async function start(env: Record<string, string>): Promise<{ url:
     const run = typeof h === "function" ? h : h.run;
     const wrapped: typeof run = async (input, ctx) => {
       const sdkCtx = ctx as typeof ctx & { secrets: AppSecrets };
-      const buzz = new BuzzIdentities({ db: ctx.db, secrets: sdkCtx.secrets, relayUrl: TEST_RELAY, allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP], fetchImpl: relayFetch });
+      const buzz = new BuzzIdentities({ db: ctx.db, secrets: sdkCtx.secrets, relayUrls: TEST_RELAY, allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP] });
       await buzz.generateAll([{ id: ctx.caller.id, name: ctx.caller.name }]);
       return run(input, ctx);
     };

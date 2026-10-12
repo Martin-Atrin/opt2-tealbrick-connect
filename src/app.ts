@@ -64,7 +64,9 @@ export interface ConnectEnv {
   /** Tests: injected chat providers and channel network (production: channelProviders() + pinned fetch + WebSocket). */
   channelProviders?: Map<ChannelServiceId, ChannelProvider>;
   channelNet?: ChannelNet;
-  /** Manifest setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL; settings reach apps only as env, S6). */
+  /** Manifest setting `buzz_relays` (env CONNECT_BUZZ_RELAYS): ordered relay list (C73; settings reach apps only as env, S6). */
+  buzzRelays?: string | null;
+  /** Old manifest setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL): read for one release as the first relay (C73 migration). */
   buzzRelayUrl?: string | null;
 }
 
@@ -75,6 +77,12 @@ type ServiceCtx = { db: Db; getKey(name: string): Promise<string | null>; secret
 type Input = Record<string, unknown>;
 const asInput = (value: Json): Input => (value && typeof value === "object" && !Array.isArray(value) ? (value as Input) : {});
 const str = (value: unknown): string | undefined => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+/** Optional agent argument `relays` (C73): narrow to some of the agent's own relays. */
+const relaysArg = (value: unknown): { relays?: string[] } => {
+  if (!Array.isArray(value)) return {};
+  const relays = value.filter((r): r is string => typeof r === "string" && r.trim().length > 0).slice(0, 8);
+  return relays.length > 0 ? { relays } : {};
+};
 
 interface Services {
   accounts: AccountStore;
@@ -129,8 +137,8 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     const buzz = new BuzzIdentities({
       db,
       secrets,
+      relayUrls: env.buzzRelays ?? null,
       relayUrl: env.buzzRelayUrl ?? null,
-      fetchImpl: outbound,
       ...(env.allowRelayOrigins ? { allowRelayOrigins: env.allowRelayOrigins } : {}),
     });
     const relay = new BuzzRelay(buzz, outbound);
@@ -285,21 +293,28 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     async buzz_identity(_input, ctx) {
       const s = services(ctx);
       const identity = s.buzz.get(ctx.caller.id);
-      return { npub: identity?.npub ?? null, pubkey: identity?.pubkey ?? null, relay: s.buzz.relayUrl() };
+      let relays: string[] = [];
+      try {
+        relays = s.buzz.relaysFor(ctx.caller.id);
+      } catch {
+        relays = [];
+      }
+      return { npub: identity?.npub ?? null, pubkey: identity?.pubkey ?? null, relay: relays[0] ?? null, relays };
     },
 
-    async buzz_channels(_input, ctx) {
-      return guard(async () => ({ channels: await services(ctx).relay.channels(ctx.caller.id) }));
+    async buzz_channels(input, ctx) {
+      return guard(async () => services(ctx).relay.channels(ctx.caller.id, relaysArg(asInput(input).relays)));
     },
     async buzz_read(input, ctx) {
       return guard(async () => {
         const i = asInput(input);
-        const messages = await services(ctx).relay.read(ctx.caller.id, {
+        const { messages, relays } = await services(ctx).relay.read(ctx.caller.id, {
           channel: String(i.channel ?? ""),
           ...(typeof i.since === "number" ? { since: i.since } : {}),
           ...(typeof i.limit === "number" ? { limit: i.limit } : {}),
+          ...relaysArg(i.relays),
         });
-        return { untrusted: true, messages };
+        return { untrusted: true, messages, relays };
       });
     },
     async buzz_post(input, ctx) {
@@ -314,6 +329,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           channel,
           content: String(i.content ?? ""),
           ...(replyTo ? { replyTo: { id: replyTo, ...(root ? { root } : {}) } } : {}),
+          ...relaysArg(i.relays),
         });
         rememberBuzzSent(ctx.db, ctx.caller.id, posted.id, channel);
         return posted;
@@ -323,7 +339,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       return guard(async () => {
         const i = asInput(input);
         ctx.receipt.summary("Buzz reaction");
-        return services(ctx).relay.react(ctx.caller.id, { channel: String(i.channel ?? ""), messageId: String(i.messageId ?? ""), emoji: String(i.emoji ?? "") });
+        return services(ctx).relay.react(ctx.caller.id, { channel: String(i.channel ?? ""), messageId: String(i.messageId ?? ""), emoji: String(i.emoji ?? ""), ...relaysArg(i.relays) });
       });
     },
     async buzz_edit(input, ctx) {
@@ -333,7 +349,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         const messageId = String(i.messageId ?? "");
         ownBuzzMessage(ctx.db, ctx.caller.id, messageId, fail);
         ctx.receipt.summary("Buzz message edited");
-        return services(ctx).relay.edit(ctx.caller.id, { channel, messageId, content: String(i.content ?? "") });
+        return services(ctx).relay.edit(ctx.caller.id, { channel, messageId, content: String(i.content ?? ""), ...relaysArg(i.relays) });
       });
     },
     buzz_delete: {
@@ -343,7 +359,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           const channel = String(i.channel ?? "");
           const messageId = String(i.messageId ?? "");
           ownBuzzMessage(ctx.db, ctx.caller.id, messageId, fail);
-          const out = await services(ctx).relay.remove(ctx.caller.id, { channel, messageId });
+          const out = await services(ctx).relay.remove(ctx.caller.id, { channel, messageId, ...relaysArg(i.relays) });
           ctx.db.prepare("DELETE FROM connect_buzz_sent WHERE agent = ? AND event_id = ?").run(ctx.caller.id, messageId);
           ctx.receipt.summary("Buzz message deleted");
           return out;
@@ -360,10 +376,12 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         if (!content) fail("buzz_content_invalid", "The message is empty.");
         if (!Number.isFinite(sendAt) || sendAt < Date.now() + 30_000 || sendAt > Date.now() + 30 * 86_400_000) fail("buzz_send_at_invalid", "sendAt must be an ISO time between 30 seconds and 30 days from now.");
         if (!services(ctx).buzz.get(ctx.caller.id)) fail("buzz_identity_missing", "You have no Buzz identity yet. Ask the owner to create Buzz identities in Connect.", 409);
+        const narrow = relaysArg(i.relays).relays;
+        const relays = services(ctx).buzz.relaysFor(ctx.caller.id, narrow);
         const id = newId("bsp");
         ctx.db
-          .prepare("INSERT INTO connect_buzz_scheduled (id, agent, channel, content, send_at, status, created_at) VALUES (?, ?, ?, ?, ?, 'scheduled', ?)")
-          .run(id, ctx.caller.id, channel, content, sendAt, Date.now());
+          .prepare("INSERT INTO connect_buzz_scheduled (id, agent, channel, content, send_at, status, created_at, relays) VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)")
+          .run(id, ctx.caller.id, channel, content, sendAt, Date.now(), narrow ? JSON.stringify(relays) : null);
         ctx.receipt.summary(`Buzz post scheduled for ${new Date(sendAt).toISOString()}`);
         return { id, sendAt: new Date(sendAt).toISOString() };
       });
@@ -504,16 +522,17 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
-          const sent = await s.relay.directMessage(ctx.caller.id, { to: String(i.to ?? ""), content: String(i.content ?? "") });
+          const sent = await s.relay.directMessage(ctx.caller.id, { to: String(i.to ?? ""), content: String(i.content ?? ""), ...relaysArg(i.relays) });
           rememberContact(ctx.db, ctx.caller.id, sent);
-          rememberBuzzSent(ctx.db, ctx.caller.id, sent.id, sent.channel);
+          for (const one of sent.sent) rememberBuzzSent(ctx.db, ctx.caller.id, one.id, one.channel);
           ctx.receipt.summary(`First Buzz DM to ${shortKey(sent.to)}`);
           ctx.receipt.meta({ subjectKind: "as_itself", to: sent.to, channel: sent.channel });
-          return sent;
+          return { id: sent.id, channel: sent.channel, to: sent.to, relays: sent.relays };
         }),
       holdView: (input) => {
         const i = asInput(input);
-        return `First direct message in Buzz\nTo: ${String(i.to ?? "")}\n\n${String(i.content ?? "")}`;
+        const relays = relaysArg(i.relays).relays;
+        return `First direct message in Buzz\nTo: ${String(i.to ?? "")}${relays ? `\nRelays: ${relays.join(", ")}` : ""}\n\n${String(i.content ?? "")}`;
       },
       redact: (input) => `First Buzz DM to ${shortKey(String(asInput(input).to ?? ""))}`,
     },
@@ -526,11 +545,11 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           if (!to) fail("buzz_recipient_invalid", "Give the person's Buzz key as npub1… or 64 hex.");
           const known = ctx.db.prepare("SELECT 1 FROM connect_buzz_contacts WHERE agent = ? AND pubkey = ?").get(ctx.caller.id, to);
           if (!known) fail("buzz_first_contact_required", "You have not written to this person before. Use buzz_dm_first; the owner approves first contact.", 409);
-          const sent = await s.relay.directMessage(ctx.caller.id, { to: to as string, content: String(i.content ?? "") });
-          rememberBuzzSent(ctx.db, ctx.caller.id, sent.id, sent.channel);
+          const sent = await s.relay.directMessage(ctx.caller.id, { to: to as string, content: String(i.content ?? ""), ...relaysArg(i.relays) });
+          for (const one of sent.sent) rememberBuzzSent(ctx.db, ctx.caller.id, one.id, one.channel);
           ctx.receipt.summary(`Buzz DM to ${shortKey(sent.to)}`);
           ctx.receipt.meta({ subjectKind: "as_itself", to: sent.to, channel: sent.channel });
-          return sent;
+          return { id: sent.id, channel: sent.channel, to: sent.to, relays: sent.relays };
         }),
       redact: (input) => `Buzz DM to ${shortKey(String(asInput(input).to ?? ""))}`,
     },
@@ -728,10 +747,24 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     async buzz_identities_list(_input, ctx) {
       const s = services(ctx);
       const byAgent = new Map(s.buzz.list().map((i) => [i.agent, i]));
+      const list = s.buzz.relayList();
       return {
-        relay: s.buzz.relayUrl(),
-        agents: agentsOf(ctx.db).map((a) => ({ agent: a.id, name: a.name, identity: byAgent.get(a.id) ?? null })),
+        relay: list.relays[0] ?? null,
+        relays: list.relays,
+        relayProblems: list.problems,
+        agents: agentsOf(ctx.db).map((a) => ({ agent: a.id, name: a.name, identity: byAgent.get(a.id) ?? null, relays: s.buzz.agentRelaySelection(a.id) })),
       };
+    },
+    async buzz_agent_relays_set(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const i = asInput(input);
+        const id = str(i.agent) ?? fail("agent_required", "Pick an agent.");
+        const agent = agentsOf(ctx.db).find((a) => a.id === id) ?? fail("agent_unknown", "Unknown agent.", 404);
+        if (i.relays !== null && !Array.isArray(i.relays)) fail("buzz_relays_invalid", "relays is a list of wss addresses, or null for all relays.");
+        const relays = s.buzz.setAgentRelays(agent.id, Array.isArray(i.relays) ? i.relays.map(String) : null);
+        return { agent: agent.id, relays };
+      });
     },
     async buzz_identities_generate(_input, ctx) {
       const s = services(ctx);
@@ -751,9 +784,19 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         const s = services(ctx);
         const one = str(asInput(input).agent);
         const targets = one ? [one] : s.buzz.list().map((i) => i.agent);
-        const published = [];
-        for (const agent of targets) published.push(await s.buzz.publishProfile(agent));
-        return { published };
+        // Every relay of each agent; one relay down is reported per agent, not fatal (C73).
+        const published: Json[] = [];
+        const failed: Json[] = [];
+        for (const agent of targets) {
+          try {
+            const out = await s.relay.publishProfile(agent);
+            published.push({ ...out.identity, relays: out.relays } as unknown as Json);
+          } catch (error) {
+            if (one) throw error;
+            failed.push({ agent, error: (error as { code?: string }).code ?? "error", detail: error instanceof Error ? error.message.slice(0, 300) : "failed" });
+          }
+        }
+        return { published, failed };
       });
     },
   };
@@ -830,6 +873,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       },
       async agentRemoved(agent, ctx) {
         ctx.db.prepare("DELETE FROM connect_agents WHERE id = ?").run(agent.id);
+        ctx.db.prepare("DELETE FROM connect_buzz_agent_relays WHERE agent = ?").run(agent.id);
       },
     },
   };
@@ -863,14 +907,16 @@ function ownBuzzMessage(db: Db, agent: string, eventId: string, fail: (code: str
 
 /** Post due scheduled Buzz messages (authorised and receipted when they were scheduled). */
 export async function runDueBuzzPosts(db: Db, relay: BuzzRelay, log: Logger, now = Date.now()): Promise<number> {
-  const due = db.prepare("SELECT id, agent, channel, content FROM connect_buzz_scheduled WHERE status = 'scheduled' AND send_at <= ? ORDER BY send_at LIMIT 20").all(now);
+  const due = db.prepare("SELECT id, agent, channel, content, relays FROM connect_buzz_scheduled WHERE status = 'scheduled' AND send_at <= ? ORDER BY send_at LIMIT 20").all(now);
   let sent = 0;
   for (const r of due) {
     const claim = db.prepare("UPDATE connect_buzz_scheduled SET status = 'sent' WHERE id = ? AND status = 'scheduled'").run(String(r.id));
     if (claim.changes === 0) continue;
     try {
-      const out = await relay.post(String(r.agent), { channel: String(r.channel), content: String(r.content) });
-      db.prepare("UPDATE connect_buzz_scheduled SET event_id = ? WHERE id = ?").run(out.id, String(r.id));
+      const narrow = r.relays === null || r.relays === undefined ? undefined : (JSON.parse(String(r.relays)) as string[]);
+      const out = await relay.post(String(r.agent), { channel: String(r.channel), content: String(r.content), ...(narrow ? { relays: narrow } : {}) });
+      const failedOn = out.relays.filter((o) => !o.ok).map((o) => `${o.relay} (${o.ok ? "" : o.error})`);
+      db.prepare("UPDATE connect_buzz_scheduled SET event_id = ?, detail = ? WHERE id = ?").run(out.id, failedOn.length ? `Sent; failed on ${failedOn.join(", ")}`.slice(0, 300) : "", String(r.id));
       rememberBuzzSent(db, String(r.agent), out.id, String(r.channel));
       sent += 1;
     } catch (error) {

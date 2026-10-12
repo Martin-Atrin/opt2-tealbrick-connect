@@ -33,7 +33,7 @@ New code is TypeScript (Node 24+). Swift only where the macOS app requires it.
 | `src/accounts.ts` | Connected accounts (several per service). Per-agent access lives in the SDK scope store: READ, READ/UPDATE (incl. create/send), READ/UPDATE/DELETE. Kind "as me" or "as itself". |
 | `src/tools.ts`, `src/effect.ts` | Tool registry behind `connect__tools_search` / `connect__tools_call`; effect and tier classification. |
 | `src/sources/composio/` | Composio client (key only to `*.composio.dev`), verified connect flow, tool sync, policies (`policies/composio/`). |
-| `src/channels/buzz/` | One Buzz (Nostr) identity per agent, created for all agents in one owner action; sealed keys; allowlisted signing. |
+| `src/channels/buzz/` | One Buzz (Nostr) identity per agent, created for all agents in one owner action; sealed keys; allowlisted signing. Several relays (C73): workspace list `buzz_relays` (old `buzz_relay_url` read for one release as entry 1), per-agent subset in the DB, publish to all / read from all with dedupe, per-relay results (`relays.ts`). |
 | `src/secrets.ts` | Sealed app secrets (AES-256-GCM, AAD = name). |
 | `scripts/catalog-build.ts` | Builds the Tealbrick catalog artifact (sha256-pinned, scrubbed) attached to a GitHub release. |
 | `scripts/conformance.ts` | Connect checks the real suite does not cover (app files, Composio policies); `pnpm conformance` runs `tb-conformance app` first. |

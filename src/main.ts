@@ -20,6 +20,8 @@ const running = await startApp(
       manifest,
       migrationsDir: join(root, "migrations"),
       dataDir: process.env.TB_DATA_DIR ?? "/data",
+      buzzRelays: process.env.CONNECT_BUZZ_RELAYS ?? null,
+      // C73 migration: the old single-relay setting is read for one release and becomes the first relay.
       buzzRelayUrl: process.env.CONNECT_BUZZ_RELAY_URL ?? null,
       ErrorClass: TbError,
     }),

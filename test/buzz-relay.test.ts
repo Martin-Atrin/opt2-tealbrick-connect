@@ -44,7 +44,6 @@ async function setup() {
     relayUrl: "wss://relay.test.example",
     db,
     secrets: memorySecrets(),
-    fetchImpl: relay.impl,
     allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"],
   });
   const created = (await identities.generateAll([{ id: "agt_A", name: "A" }])).created[0];
@@ -70,12 +69,14 @@ function metaEvent(id: string, name: string, flags: string[][]) {
 
 test("channels: only channels whose member list names the agent", async () => {
   const s = await setup();
-  assert.deepEqual(await s.relay.channels("agt_A"), [{ id: CHANNEL, name: "general", type: "channel" }]);
+  const out = await s.relay.channels("agt_A");
+  assert.deepEqual(out.channels, [{ id: CHANNEL, name: "general", type: "channel", relays: ["wss://relay.test.example"] }]);
+  assert.deepEqual(out.relays, [{ relay: "wss://relay.test.example", ok: true }]);
 });
 
 test("read: forged and off-channel events dropped, bidi stripped", async () => {
   const s = await setup();
-  const messages = await s.relay.read("agt_A", { channel: CHANNEL, since: 50 });
+  const { messages } = await s.relay.read("agt_A", { channel: CHANNEL, since: 50 });
   assert.equal(messages.length, 1);
   assert.equal(messages[0]?.content, "hello agent");
   assert.equal(messages[0]?.fromSelf, false);
@@ -105,7 +106,7 @@ test("posting to a channel the agent is not a member of is a clear refusal (QA S
   const relay = fakeFetch({
     "POST /events": () => ({ status: 400, body: { error: "restricted: not a channel member" } }),
   });
-  const identities = new BuzzIdentities({ db, secrets: memorySecrets(), fetchImpl: relay.impl, relayUrl: "wss://relay.test.example", allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"] });
+  const identities = new BuzzIdentities({ db, secrets: memorySecrets(), relayUrl: "wss://relay.test.example", allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"] });
   await identities.generateAll([{ id: "agt_A", name: "A" }]);
   const r = new BuzzRelay(identities, relay.impl);
   await assert.rejects(r.post("agt_A", { channel: CHANNEL, content: "hi" }), (e: BuzzRefusal) => e.code === "buzz_not_member" && e.httpStatus === 403);

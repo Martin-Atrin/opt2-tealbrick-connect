@@ -69,7 +69,8 @@ export function isForbiddenAddress(address: string): boolean {
   return false;
 }
 
-function forbiddenName(host: string): boolean {
+/** Local names: localhost, *.localhost, *.local, *.internal, single label. */
+export function isForbiddenHostname(host: string): boolean {
   const h = host.toLowerCase().replace(/\.$/u, "");
   return h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal") || !h.includes(".");
 }
@@ -97,7 +98,7 @@ export async function assertEndpointAllowed(value: string, options: PolicyOption
     if (isForbiddenAddress(host)) throw new NetPolicyError("address_not_allowed");
     return url;
   }
-  if (forbiddenName(host)) throw new NetPolicyError("hostname_not_allowed");
+  if (isForbiddenHostname(host)) throw new NetPolicyError("hostname_not_allowed");
   let answers: ReadonlyArray<{ address: string }>;
   try {
     answers = await (options.lookup ?? defaultLookup)(host);

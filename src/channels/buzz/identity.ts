@@ -4,16 +4,19 @@
  * - The secret key is held in the SDK app secrets (ctx.secrets, C31) under `buzz:<agent>`; it is never shown, exported, logged or
  *   returned. There is no import. The owner sees npubs and copies them into Buzz (add agents to channels there).
  * - Rotation replaces the key (the old one is gone). Removing an identity deletes the sealed key.
- * - Optional: publish a kind 0 profile ({name, display_name, about}) to the configured relay over the relay's
- *   HTTP endpoint with NIP-98 auth. During opt2 only to a test relay (C22).
+ * - Relays (C73): the workspace has an ordered relay list (relays.ts); each agent uses all of them unless the owner
+ *   limits it to a subset (table connect_buzz_agent_relays; no row = all workspace relays). The same identity is used
+ *   on every relay. Network work (profiles, posts, reads) is in relay.ts.
  */
 
 
 import type { AppSecrets } from "@opt2-tealbrick/miniapp-sdk";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
-import { type FetchLike, requestJson } from "../../util/http.ts";
 import { assertEndpointAllowed, type Lookup } from "../../util/net-policy.ts";
 import { generateSecretKey, nip98Header, npubEncode, publicKeyOf, signEvent } from "./nostr.ts";
+import { BuzzRefusal, MAX_RELAYS, normalizeRelayUrl, type RelayList, workspaceRelayList } from "./relays.ts";
+
+export { normalizeRelayUrl } from "./relays.ts";
 
 const SECRET_PREFIX = "buzz:";
 const NAME_MAX = 80;
@@ -34,10 +37,11 @@ export type BuzzIdentityView = {
 
 export interface BuzzDeps {
   db: Db;
-  /** Value of the manifest setting `buzz_relay_url` (owner sets it in Portal; reaches the app as env, S6). */
+  /** Manifest setting `buzz_relays` (env CONNECT_BUZZ_RELAYS): the ordered relay list (C73). */
+  relayUrls?: string | null;
+  /** Old manifest setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL): read for one release as the first list entry. */
   relayUrl?: string | null;
   secrets: AppSecrets;
-  fetchImpl?: FetchLike;
   lookup?: Lookup;
   /** Exact relay origins allowed without the public-address check (test relay). */
   allowRelayOrigins?: readonly string[];
@@ -59,21 +63,6 @@ function view(row: Record<string, unknown>): BuzzIdentityView {
     createdAt: Number(row.created_at),
     profilePublishedAt: row.profile_published_at === null ? null : Number(row.profile_published_at),
   };
-}
-
-/** `wss://host[:port]` only (no path, query, userinfo); `ws://` only for an exact allowlisted test origin. */
-export function normalizeRelayUrl(value: string, allowOrigins: readonly string[] = []): string {
-  let url: URL;
-  try {
-    url = new URL(value.trim());
-  } catch {
-    throw new Error("relay_url_invalid");
-  }
-  const testOrigin = url.protocol === "ws:" && allowOrigins.includes(url.origin);
-  if ((url.protocol !== "wss:" && !testOrigin) || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
-    throw new Error("relay_url_invalid");
-  }
-  return `${url.protocol}//${url.host}`;
 }
 
 export class BuzzIdentities {
@@ -145,10 +134,79 @@ export class BuzzIdentities {
     this.#d.db.prepare("DELETE FROM connect_buzz_identities WHERE agent = ?").run(agent);
   }
 
-  /** The relay from the manifest setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL, set in Portal); normalized. */
+  /** Workspace relays (C73): old `buzz_relay_url` first, then `buzz_relays`; normalised, deduplicated, at most 8. */
+  relayList(): RelayList {
+    return workspaceRelayList({ list: this.#d.relayUrls ?? null, legacy: this.#d.relayUrl ?? null, ...(this.#d.allowRelayOrigins ? { allowOrigins: this.#d.allowRelayOrigins } : {}) });
+  }
+
+  workspaceRelays(): string[] {
+    return this.relayList().relays;
+  }
+
+  /** First workspace relay (single-relay callers and the old `relay` output field). */
   relayUrl(): string | null {
-    const raw = this.#d.relayUrl?.trim();
-    return raw ? normalizeRelayUrl(raw, this.#d.allowRelayOrigins) : null;
+    return this.workspaceRelays()[0] ?? null;
+  }
+
+  /** The owner's subset for one agent, or null = all workspace relays. */
+  agentRelaySelection(agent: string): string[] | null {
+    const row = this.#d.db.prepare("SELECT relays FROM connect_buzz_agent_relays WHERE agent = ?").get(agent);
+    if (!row) return null;
+    try {
+      const value = JSON.parse(String(row.relays)) as unknown;
+      return Array.isArray(value) ? value.filter((r): r is string => typeof r === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Owner action: limit an agent to a subset of the workspace relays (null = all relays, also relays added later). */
+  setAgentRelays(agent: string, relays: readonly string[] | null): string[] | null {
+    if (relays === null) {
+      this.#d.db.prepare("DELETE FROM connect_buzz_agent_relays WHERE agent = ?").run(agent);
+      return null;
+    }
+    const workspace = this.workspaceRelays();
+    const chosen: string[] = [];
+    for (const entry of relays.slice(0, MAX_RELAYS * 2)) {
+      let relay: string;
+      try {
+        relay = normalizeRelayUrl(entry, this.#d.allowRelayOrigins);
+      } catch {
+        throw new BuzzRefusal("buzz_relay_invalid", "Each relay must be a wss:// address from the workspace relay list.", 400);
+      }
+      if (!workspace.includes(relay)) throw new BuzzRefusal("buzz_relay_unknown", `${relay} is not in the workspace relay list. Add it in Connect's settings in Portal first.`, 400);
+      if (!chosen.includes(relay)) chosen.push(relay);
+    }
+    if (chosen.length === 0) throw new BuzzRefusal("buzz_relays_empty", "Choose at least one relay, or choose all relays.", 400);
+    const ordered = workspace.filter((r) => chosen.includes(r));
+    this.#d.db
+      .prepare("INSERT INTO connect_buzz_agent_relays (agent, relays, updated_at) VALUES (?, ?, ?) ON CONFLICT (agent) DO UPDATE SET relays = excluded.relays, updated_at = excluded.updated_at")
+      .run(agent, JSON.stringify(ordered), this.#now());
+    return ordered;
+  }
+
+  /**
+   * The relays one agent uses now: the workspace list, limited by the owner's subset, optionally narrowed further by the
+   * agent's own `relays` argument (only within what it is allowed). Order = workspace order.
+   */
+  relaysFor(agent: string, requested?: readonly string[]): string[] {
+    const workspace = this.workspaceRelays();
+    if (workspace.length === 0) throw new BuzzRefusal("buzz_relay_missing", "No Buzz relay is set. The owner sets Buzz relays in Connect's settings in Portal.", 409);
+    const selection = this.agentRelaySelection(agent);
+    const allowed = selection === null ? workspace : workspace.filter((r) => selection.includes(r));
+    if (allowed.length === 0) throw new BuzzRefusal("buzz_relays_none_selected", "None of the relays the owner chose for you is in the workspace relay list. Ask the owner to update your Buzz relays in Connect.", 409);
+    if (!requested || requested.length === 0) return allowed;
+    const wanted = requested.map((entry) => {
+      try {
+        return normalizeRelayUrl(entry, this.#d.allowRelayOrigins);
+      } catch {
+        throw new BuzzRefusal("buzz_relay_invalid", "relays must be wss:// addresses from buzz_identity.", 400);
+      }
+    });
+    const unknown = wanted.find((r) => !allowed.includes(r));
+    if (unknown) throw new BuzzRefusal("buzz_relay_not_allowed", `You cannot use ${unknown}. Your relays are listed by buzz_identity.`, 403);
+    return allowed.filter((r) => wanted.includes(r));
   }
 
   #policy(): { allowOrigins?: readonly string[]; lookup?: Lookup } {
@@ -173,40 +231,22 @@ export class BuzzIdentities {
   }
 
   /** Relay HTTP base (`https://<relay host>`), checked against the outbound policy on every use. */
-  async relayHttpBase(): Promise<string> {
-    const relay = this.relayUrl();
-    if (!relay) throw new Error("buzz_relay_missing");
+  async relayHttpBase(relay: string | null = this.relayUrl()): Promise<string> {
+    if (!relay) throw new BuzzRefusal("buzz_relay_missing", "No Buzz relay is set. The owner sets Buzz relays in Connect's settings in Portal.", 409);
     const base = relay.replace(/^wss:/u, "https:").replace(/^ws:/u, "http:");
     await assertEndpointAllowed(base, { schemes: ["https:"], ...this.#policy() });
     return base;
   }
 
-  /** Publish the agent's kind 0 profile via the relay's HTTP endpoint (`POST https://<relay>/events`, NIP-98). */
-  async publishProfile(agent: string, about = "Teal Brick agent"): Promise<BuzzIdentityView> {
-    const identity = this.get(agent);
-    if (!identity) throw new Error("buzz_identity_missing");
-    const httpUrl = `${await this.relayHttpBase()}/events`;
-    const event = await this.sign(agent, {
-      kind: 0,
-      tags: [],
-      content: JSON.stringify({ name: identity.displayName, display_name: identity.displayName, about: about.slice(0, 280) }),
-    });
-    const body = JSON.stringify(event);
-    const secret = await this.#d.secrets.get(`${SECRET_PREFIX}${agent}`);
-    if (!secret) throw new Error("buzz_identity_missing");
-    const authorization = nip98Header(secret, { url: httpUrl, method: "POST", body, now: Math.floor(this.#now() / 1000) });
-    const answer = await requestJson<{ accepted?: boolean; message?: string }>({
-      method: "POST",
-      url: httpUrl,
-      body: event,
-      headers: { authorization },
-      timeoutMs: 15_000,
-      ...(this.#d.fetchImpl ? { fetchImpl: this.#d.fetchImpl } : {}),
-    });
-    if (answer?.accepted === false) throw new Error(`buzz_profile_rejected: ${String(answer.message ?? "").slice(0, 200)}`);
+  markProfilePublished(agent: string): BuzzIdentityView {
     this.#d.db.prepare("UPDATE connect_buzz_identities SET profile_published_at = ? WHERE agent = ?").run(this.#now(), agent);
     const published = this.get(agent);
     if (!published) throw new Error("buzz_identity_missing");
     return published;
+  }
+
+  /** Agent removed from the workspace: its relay subset goes too. */
+  forgetAgent(agent: string): void {
+    this.#d.db.prepare("DELETE FROM connect_buzz_agent_relays WHERE agent = ?").run(agent);
   }
 }

@@ -9,6 +9,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { createConnectApp } from "../src/app.ts";
 import { BuzzIdentities, normalizeRelayUrl } from "../src/channels/buzz/identity.ts";
 import { eventId, KindNotAllowedError, npubEncode, publicKeyOf, signEvent, verifyEvent } from "../src/channels/buzz/nostr.ts";
+import { BuzzRelay } from "../src/channels/buzz/relay.ts";
 import { fakeFetch, handlerOf, memorySecrets, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
@@ -79,7 +80,9 @@ test("relay URL: wss host only; private relays refused", async () => {
   const db = testDb();
   const buzz = new BuzzIdentities({ db, secrets: memorySecrets(), relayUrl: "wss://relay.corp.example", lookup: async () => [{ address: "10.0.0.2", family: 4 }] });
   await assert.rejects(buzz.relayHttpBase(), /address_not_allowed|not allowed/u);
-  assert.throws(() => new BuzzIdentities({ db, secrets: memorySecrets(), relayUrl: "ws://relay.example.com" }).relayUrl(), /relay_url_invalid/u);
+  const ws = new BuzzIdentities({ db, secrets: memorySecrets(), relayUrl: "ws://relay.example.com" });
+  assert.equal(ws.relayUrl(), null);
+  assert.match(ws.relayList().problems[0] ?? "", /wss:\/\//u);
   assert.equal(new BuzzIdentities({ db, secrets: memorySecrets() }).relayUrl(), null);
 });
 
@@ -101,13 +104,13 @@ test("profile publish posts a signed kind 0 with a valid NIP-98 header to the te
   const buzz = new BuzzIdentities({
     db,
     secrets: memorySecrets(),
-    fetchImpl: relay.impl,
     relayUrl: "wss://relay.test.example",
     allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"],
   });
   await buzz.generateAll([{ id: "agt_A", name: "Agent A" }]);
-  const published = await buzz.publishProfile("agt_A");
-  assert.ok(published.profilePublishedAt);
+  const published = await new BuzzRelay(buzz, relay.impl).publishProfile("agt_A");
+  assert.ok(published.identity.profilePublishedAt);
+  assert.deepEqual(published.relays, [{ relay: "wss://relay.test.example", ok: true }]);
   assert.equal(relay.calls.length, 1);
   assert.equal(JSON.parse(((relay.calls[0]?.body ?? {}) as { content: string }).content).name, "Agent A");
 });

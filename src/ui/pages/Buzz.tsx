@@ -1,9 +1,9 @@
-import { Button } from "@opt2-tealbrick/ui";
+import { Button, Dialog } from "@opt2-tealbrick/ui";
 import { useState } from "react";
 
 import { ConfirmDialog, Notice } from "../components.tsx";
 import { copyText, errorText, useLoad } from "../hooks.ts";
-import { type BuzzIdentity, buzzIdentitiesGenerate, buzzIdentitiesList, buzzIdentityRotate, buzzProfilePublish } from "../ops.ts";
+import { type BuzzIdentity, buzzAgentRelaysSet, buzzIdentitiesGenerate, buzzIdentitiesList, buzzIdentityRotate, buzzProfilePublish } from "../ops.ts";
 
 function formatCreated(value: number): string {
   const ms = value < 1e12 ? value * 1000 : value;
@@ -15,8 +15,10 @@ export function Buzz() {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [rotating, setRotating] = useState<{ agent: string; name: string } | null>(null);
+  const [choosing, setChoosing] = useState<{ agent: string; name: string; relays: string[] | null } | null>(null);
 
-  const savedRelay = list.data?.relay ?? "";
+  const relays = list.data?.relays ?? [];
+  const relayProblems = list.data?.relayProblems ?? [];
 
   const rows = list.data?.agents ?? [];
   const withIdentity = rows.filter((r): r is typeof r & { identity: BuzzIdentity } => r.identity !== null);
@@ -50,7 +52,17 @@ export function Buzz() {
   const publish = () =>
     run("publish", async () => {
       const out = await buzzProfilePublish();
-      return `Published ${out.published.length} profile${out.published.length === 1 ? "" : "s"} to the relay.`;
+      const down = new Set(out.published.flatMap((p) => p.relays.filter((r) => !r.ok).map((r) => r.relay)));
+      const parts = [`Published ${out.published.length} profile${out.published.length === 1 ? "" : "s"}.`];
+      if (down.size > 0) parts.push(`These relays did not accept all profiles: ${[...down].join(", ")}.`);
+      if (out.failed.length > 0) parts.push(`${out.failed.length} agent${out.failed.length === 1 ? "" : "s"} could not publish on any relay.`);
+      return parts.join(" ");
+    });
+
+  const saveRelays = (target: { agent: string; name: string }, chosen: string[] | null) =>
+    run("relays", async () => {
+      await buzzAgentRelaysSet(target.agent, chosen);
+      return chosen === null ? `${target.name} uses all relays.` : `${target.name} uses ${chosen.length} of ${relays.length} relays.`;
     });
 
   const copyAll = async () => {
@@ -65,9 +77,33 @@ export function Buzz() {
       {message ? <Notice tone={message.error ? "error" : "info"}>{message.text}</Notice> : null}
       {list.error ? <Notice tone="error">{list.error}</Notice> : null}
 
-      <p>
-        Relay: {savedRelay ? <code>{savedRelay}</code> : "not set"}. You set the relay address in Teal Brick Portal, in Connect's settings.
-      </p>
+      <section aria-labelledby="buzz-relays">
+        <h3 id="buzz-relays">Relays</h3>
+        {relays.length === 0 ? (
+          <p>No relay is set. Set the Buzz relays in Teal Brick Portal, in Connect's settings.</p>
+        ) : (
+          <>
+            <ol className="relay-list">
+              {relays.map((r) => (
+                <li key={r}>
+                  <code>{r}</code>
+                </li>
+              ))}
+            </ol>
+            <p className="muted">Agents post to every relay they use and read from all of them. You change the list in Teal Brick Portal, in Connect's settings.</p>
+          </>
+        )}
+        {relayProblems.length > 0 ? (
+          <Notice tone="error">
+            {relayProblems.map((p) => (
+              <span key={p}>
+                {p}
+                <br />
+              </span>
+            ))}
+          </Notice>
+        ) : null}
+      </section>
 
       <div className="row actions">
         <Button type="button" variant="primary" disabled={busy !== null || rows.length === 0} onClick={() => void generate()}>
@@ -79,8 +115,8 @@ export function Buzz() {
         <Button
           type="button"
           variant="secondary"
-          disabled={busy !== null || withIdentity.length === 0 || !savedRelay}
-          title={savedRelay ? undefined : "Set the relay address in Connect's settings in Portal first"}
+          disabled={busy !== null || withIdentity.length === 0 || relays.length === 0}
+          title={relays.length > 0 ? undefined : "Set the Buzz relays in Connect's settings in Portal first"}
           onClick={() => void publish()}
         >
           Publish profiles
@@ -98,6 +134,7 @@ export function Buzz() {
                 <th scope="col">Agent</th>
                 <th scope="col">npub</th>
                 <th scope="col">Created</th>
+                <th scope="col">Relays</th>
                 <th scope="col">
                   <span className="visually-hidden">Actions</span>
                 </th>
@@ -118,6 +155,14 @@ export function Buzz() {
                     )}
                   </td>
                   <td data-label={row.identity ? "Created" : ""}>{row.identity ? formatCreated(row.identity.createdAt) : ""}</td>
+                  <td data-label="Relays">
+                    <span>{relayLabel(row.relays, relays)}</span>{" "}
+                    {relays.length > 1 ? (
+                      <Button type="button" variant="secondary" size="sm" disabled={busy !== null} onClick={() => setChoosing({ agent: row.agent, name: row.name, relays: row.relays })} aria-label={`Choose relays of ${row.name}`}>
+                        Choose
+                      </Button>
+                    ) : null}
+                  </td>
                   <td data-label="">
                     {row.identity ? (
                       <Button type="button" variant="danger" disabled={busy !== null} onClick={() => setRotating({ agent: row.agent, name: row.name })} aria-label={`Replace key of ${row.name}`}>
@@ -130,6 +175,22 @@ export function Buzz() {
             </tbody>
           </table>
         </div>
+      ) : null}
+
+      {choosing ? (
+        <RelayDialog
+          key={choosing.agent}
+          name={choosing.name}
+          workspace={relays}
+          selected={choosing.relays}
+          busy={busy !== null}
+          onCancel={() => setChoosing(null)}
+          onSave={(chosen) => {
+            const target = choosing;
+            setChoosing(null);
+            void saveRelays(target, chosen);
+          }}
+        />
       ) : null}
 
       <ConfirmDialog
@@ -163,5 +224,51 @@ function CopyButton({ text, label }: { text: string; label: string }) {
     >
       {state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy"}
     </Button>
+  );
+}
+
+function relayLabel(selected: string[] | null, workspace: string[]): string {
+  if (workspace.length === 0) return "No relay";
+  if (selected === null) return workspace.length === 1 ? "The relay" : `All ${workspace.length} relays`;
+  const used = workspace.filter((r) => selected.includes(r)).length;
+  return used === 0 ? "None (update the choice)" : `${used} of ${workspace.length} relays`;
+}
+
+/** Owner choice per agent (C73): all workspace relays (default, includes relays added later) or a subset. */
+function RelayDialog(props: { name: string; workspace: string[]; selected: string[] | null; busy: boolean; onCancel(): void; onSave(relays: string[] | null): void }) {
+  const [all, setAll] = useState(props.selected === null);
+  const [chosen, setChosen] = useState<string[]>(props.selected ?? props.workspace);
+  const toggle = (relay: string, on: boolean) => setChosen((prev) => (on ? [...prev, relay] : prev.filter((r) => r !== relay)));
+  const picked = props.workspace.filter((r) => chosen.includes(r));
+  return (
+    <Dialog
+      open
+      title={`Buzz relays for ${props.name}`}
+      onClose={props.onCancel}
+      busy={props.busy}
+      footer={
+        <>
+          <Button variant="secondary" onClick={props.onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" disabled={props.busy || (!all && picked.length === 0)} onClick={() => props.onSave(all ? null : picked)}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <label className="row">
+        <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Use all relays (also relays you add later)
+      </label>
+      <fieldset disabled={all} className="relay-choices">
+        <legend>Relays this agent uses</legend>
+        {props.workspace.map((relay) => (
+          <label key={relay} className="row">
+            <input type="checkbox" checked={all || chosen.includes(relay)} onChange={(e) => toggle(relay, e.target.checked)} /> <code>{relay}</code>
+          </label>
+        ))}
+      </fieldset>
+      {!all && picked.length === 0 ? <p className="muted">Choose at least one relay.</p> : null}
+    </Dialog>
   );
 }

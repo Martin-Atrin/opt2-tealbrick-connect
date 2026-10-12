@@ -46,7 +46,11 @@ export interface BuzzAgentRow {
   agent: string;
   name: string;
   identity: BuzzIdentity | null;
+  /** Owner's relay subset for this agent; null = all workspace relays (C73). */
+  relays: string[] | null;
 }
+
+export type RelayOutcome = { relay: string; ok: true } | { relay: string; ok: false; error: string; detail: string };
 
 export const servicesSearch = (query: string) => callOp<{ composioKey: boolean; catalogAvailable?: boolean; services: ServiceHit[] }>("services_search", { query });
 export const accountsOverview = () => callOp<{ accounts: Account[] }>("accounts_overview", {});
@@ -64,10 +68,12 @@ export const accountUpdate = (id: string, label: string) => callOp<{ account: Ac
 export const accountDisconnect = (id: string) => callOp<{ account: Account }>("account_disconnect", { id });
 export const toolsRefresh = (service: string) => callOp<{ service: string; tools: Json }>("tools_refresh", { service });
 
-export const buzzIdentitiesList = () => callOp<{ relay: string | null; agents: BuzzAgentRow[] }>("buzz_identities_list", {});
+export const buzzIdentitiesList = () => callOp<{ relay: string | null; relays: string[]; relayProblems: string[]; agents: BuzzAgentRow[] }>("buzz_identities_list", {});
+export const buzzAgentRelaysSet = (agent: string, relays: string[] | null) => callOp<{ agent: string; relays: string[] | null }>("buzz_agent_relays_set", { agent, relays });
 export const buzzIdentitiesGenerate = () => callOp<{ created: BuzzIdentity[]; existing: BuzzIdentity[] }>("buzz_identities_generate", {});
 export const buzzIdentityRotate = (agent: string) => callOp<{ identity: BuzzIdentity }>("buzz_identity_rotate", { agent });
-export const buzzProfilePublish = (agent?: string) => callOp<{ published: Json[] }>("buzz_profile_publish", agent ? { agent } : {});
+export const buzzProfilePublish = (agent?: string) =>
+  callOp<{ published: (BuzzIdentity & { relays: RelayOutcome[] })[]; failed: { agent: string; error: string; detail: string }[] }>("buzz_profile_publish", agent ? { agent } : {});
 
 export interface AgentInfo {
   id: string;
