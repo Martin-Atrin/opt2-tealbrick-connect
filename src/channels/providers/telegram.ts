@@ -26,6 +26,7 @@ import {
   cleanInboundText,
   type InboundMessage,
   type InboundSink,
+  mentionList,
   type SendInput,
 } from "../provider.ts";
 import { asRecord, backoffMs, cleanName, type ProviderResponse, pause, providerDetail, providerRequest, rateLimited } from "./http.ts";
@@ -166,7 +167,26 @@ function conversationType(chatType: unknown): InboundMessage["conversationType"]
  * only `message` and `channel_post`; bots (the bot itself included) ignored; channel posts and anonymous admins use
  * `sender_chat` as the sender; `threadId` is the forum topic id; text or caption, files as short placeholders.
  */
-export function parseTelegramUpdate(update: unknown, bot: Pick<BotIdentity, "botId">, now: number): InboundMessage | null {
+/**
+ * F15: mentioned user ids from message entities. `text_mention` carries the user id; an `@username` mention carries only
+ * a name, so it counts only when it names this bot (its username). Offsets are UTF-16, as in JS strings.
+ */
+function telegramMentions(message: Record<string, unknown>, body: string, bot: Pick<BotIdentity, "botId"> & { botName?: string }): string[] {
+  const entities = [message.entities, message.caption_entities].flatMap((e) => (Array.isArray(e) ? e : []));
+  const out: string[] = [];
+  for (const raw of entities) {
+    const e = asRecord(raw);
+    if (!e) continue;
+    const user = asRecord(e.user);
+    if (e.type === "text_mention" && typeof user?.id === "number" && Number.isSafeInteger(user.id)) out.push(String(user.id));
+    if (e.type === "mention" && typeof e.offset === "number" && typeof e.length === "number" && bot.botName) {
+      if (body.slice(e.offset, e.offset + e.length).toLowerCase() === `@${bot.botName.toLowerCase()}`) out.push(bot.botId);
+    }
+  }
+  return mentionList(out);
+}
+
+export function parseTelegramUpdate(update: unknown, bot: Pick<BotIdentity, "botId"> & { botName?: string }, now: number): InboundMessage | null {
   const record = asRecord(update);
   if (!record) return null;
   const message = asRecord(record.message) ?? asRecord(record.channel_post);
@@ -208,6 +228,7 @@ export function parseTelegramUpdate(update: unknown, bot: Pick<BotIdentity, "bot
     senderName,
     text,
     sentAt: typeof date === "number" && Number.isFinite(date) && date > 0 ? date * 1000 : now,
+    mentions: telegramMentions(message, body, bot),
   };
 }
 

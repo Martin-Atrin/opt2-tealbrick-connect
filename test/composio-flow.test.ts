@@ -13,7 +13,7 @@ import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { AccountStore } from "../src/accounts.ts";
 import { type ConnectError, createConnectApp } from "../src/app.ts";
 import { allowedComposioOrigin, ComposioClient } from "../src/sources/composio/client.ts";
-import { fakeFetch, handlerOf, publicCtx, root, secretsFor, testCtx, testDb } from "./helpers.ts";
+import { eventCtx, fakeFetch, handlerOf, publicCtx, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const WS = "ws_01TESTWORKSPACE00000000000";
@@ -63,7 +63,7 @@ function setup() {
   });
   const h = (name: string) => handlerOf(app, name);
   for (const agent of [{ id: ME, name: "Me" }, { id: OTHER, name: "Other" }]) {
-    void app.events?.agentAdded?.({ ...agent, id: agent.id as `agt_${string}`, mode: "free", status: "active" }, { db, scopes: null as never, log: testCtx({ db }).log });
+    void app.events?.agentAdded?.({ ...agent, id: agent.id as `agt_${string}`, mode: "free", status: "active" }, eventCtx(db));
   }
   return { db, upstream, app, h };
 }

@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AppSecrets, SdkOpContext, SdkPublicContext } from "@opt2-tealbrick/miniapp-sdk";
+import type { AppSecrets, SdkEventContext, SdkOpContext, SdkPublicContext } from "@opt2-tealbrick/miniapp-sdk";
 import type { CrudAction } from "@opt2-tealbrick/spec/manifest";
 import type { Db, Json } from "@opt2-tealbrick/spec/sdk";
 
@@ -57,12 +57,12 @@ export function secretsFor(db: Db) {
   }
   return secrets;
 }
-export const scopeCreates: { type: string; id: string; label: string }[] = [];
+export const scopeCreates: { type: string; id: string; label: string; shared: boolean }[] = [];
 const scopesStub = {
   instances: {
-    create: async (type: string, id: string, label: string) => {
-      scopeCreates.push({ type, id, label });
-      return { type, id, label, shared: false };
+    create: async (type: string, id: string, label: string, opts?: { shared?: boolean }) => {
+      scopeCreates.push({ type, id, label, shared: opts?.shared === true });
+      return { type, id, label, shared: opts?.shared === true };
     },
     list: async () => [],
   },
@@ -90,6 +90,8 @@ export function testCtx(input: {
   ws?: string;
   /** person call from the app UI: no grant */
   person?: boolean;
+  /** companion APP caller (C86): caller.type "app", id = this instance id */
+  app?: string;
   /** SDK workspace (slice / person principal); defaults to `ws` */
   workspace?: string | null;
   publicUrl?: string | null;
@@ -104,8 +106,14 @@ export function testCtx(input: {
   return {
     caller: input.person
       ? { type: "person", id: "per_01TESTOWNER00000000000000" as `per_${string}`, name: "Owner", mode: null }
-      : { type: "agent", id: agent as `agt_${string}`, name: "Test agent", mode: "free" },
-    grant: input.person ? null : { ok: true, token: "t", claims: { ws: input.ws ?? "ws_TEST" } as never, caller: { type: "agent", id: agent as `agt_${string}` } },
+      : input.app
+        ? { type: "app", id: input.app as `ins_${string}`, name: "Test app", mode: null }
+        : { type: "agent", id: agent as `agt_${string}`, name: "Test agent", mode: "free" },
+    grant: input.person
+      ? null
+      : input.app
+        ? ({ ok: true, token: "t", claims: { ws: input.ws ?? "ws_TEST" } as never, caller: { type: "app", id: input.app as `ins_${string}` } } as never)
+        : { ok: true, token: "t", claims: { ws: input.ws ?? "ws_TEST" } as never, caller: { type: "agent", id: agent as `agt_${string}` } },
     op: {} as never,
     scope: {
       access: null,
@@ -124,6 +132,9 @@ export function testCtx(input: {
     callServiceHelper: async () => {
       throw new Error("not used");
     },
+    statusChanged() {},
+    ownerLink: () => null,
+    companionTargets: () => [],
     db: input.db,
     log: { debug() {}, info() {}, warn() {}, error() {} },
     signal: new AbortController().signal,
@@ -132,6 +143,21 @@ export function testCtx(input: {
     scopes: scopesStub,
     secrets: secretsFor(input.db),
     receipts,
+  };
+}
+
+/** Event handler context (agentAdded / agentRemoved) as the SDK passes it (v0.1.13 EventContext). */
+export function eventCtx(db: Db): SdkEventContext {
+  return {
+    db,
+    scopes: null as never,
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    callApp: async () => {
+      throw new Error("not used");
+    },
+    statusChanged() {},
+    ownerLink: () => null,
+    companionTargets: () => [],
   };
 }
 

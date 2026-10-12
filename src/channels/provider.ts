@@ -61,6 +61,16 @@ export interface InboundMessage {
   text: string;
   /** epoch ms from the provider when it has one, else receive time */
   sentAt: number;
+  /**
+   * F15: provider user ids this message mentions (the bot included when it was addressed), at most 50, de-duplicated.
+   * Read as `<service>:<id>` handles (SDK-API §18) in channel_inbox.
+   */
+  mentions?: string[];
+}
+
+/** De-duplicated, bounded mention id list (F15). */
+export function mentionList(ids: Iterable<string>): string[] {
+  return [...new Set([...ids].filter((id) => id.length > 0 && id.length <= 200))].slice(0, 50);
 }
 
 export type InboundSink = (message: InboundMessage) => void;

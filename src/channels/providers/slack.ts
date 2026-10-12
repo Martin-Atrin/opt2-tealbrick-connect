@@ -19,6 +19,7 @@ import {
   cleanInboundText,
   type InboundMessage,
   type InboundSink,
+  mentionList,
   scrub,
 } from "../provider.ts";
 
@@ -296,6 +297,9 @@ export function parseSlackEvent(payload: unknown, bot: BotIdentity, now: () => n
   const raw = typeof event.text === "string" ? event.text : "";
   // The bot's own mention token is addressing, not content.
   const text = cleanInboundText(decodeSlackText(raw.split(`<@${bot.botId}>`).join("")).trim());
+  // F15: `<@U…>` / `<@U…|name>` user mentions (the bot's own included) from the raw text; app_mention addresses the bot.
+  const mentioned = [...raw.matchAll(/<@([UW][A-Z0-9]{2,30})(?:\|[^>]*)?>/gu)].map((m) => m[1] as string);
+  if (event.type === "app_mention") mentioned.push(bot.botId);
   const seconds = Number(ts);
   return {
     eventId,
@@ -308,6 +312,7 @@ export function parseSlackEvent(payload: unknown, bot: BotIdentity, now: () => n
       senderName,
       text,
       sentAt: Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : now(),
+      mentions: mentionList(mentioned),
     },
   };
 }

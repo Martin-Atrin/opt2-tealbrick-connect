@@ -285,6 +285,7 @@ test("socket mode: hello, ack every envelope, messages to the sink, filters, ded
       senderName: "Ada",
       text: "can you check <this> & that?",
       sentAt: 1_700_000_200_000,
+      mentions: ["U0BOTUSER1"],
     },
     {
       conversation: "D0DIRECT01",
@@ -295,6 +296,7 @@ test("socket mode: hello, ack every envelope, messages to the sink, filters, ded
       senderName: "U0HUMAN002",
       text: "replying in thread",
       sentAt: 1_700_000_300_000,
+      mentions: [],
     },
   ]);
 

@@ -4,17 +4,19 @@
  * Everything here is typed against the frozen contract (`@opt2-tealbrick/spec`).
  */
 
+import { channelSenderId } from "@opt2-tealbrick/manifest";
 import type { AppSecrets, SdkAppDefinition, SdkOpContext, SdkPublicContext } from "@opt2-tealbrick/miniapp-sdk";
 import type { CrudAction, DynamicCatalogEntry, DynamicResolution, DynamicSearchInput, Manifest } from "@opt2-tealbrick/spec/manifest";
-import type { Db, DynamicHandlers, Handler, HandlerSpec, Json, Logger, OpContext, PublicHandler } from "@opt2-tealbrick/spec/sdk";
+import type { Caller, Db, DynamicHandlers, Handler, HandlerSpec, Json, Logger, OpContext, PublicHandler } from "@opt2-tealbrick/spec/sdk";
 
 import { type Account, AccountStore, CONNECTION_KINDS, type ConnectionKind } from "./accounts.ts";
-import { BuzzIdentities } from "./channels/buzz/identity.ts";
+import { BuzzIdentities, WORKSPACE_SENDER } from "./channels/buzz/identity.ts";
 import { parsePubkey } from "./channels/buzz/nostr.ts";
 import { BuzzRefusal, BuzzRelay } from "./channels/buzz/relay.ts";
 import { ChannelError, type ChannelNet, type ChannelProvider, type ChannelService as ChannelServiceId } from "./channels/provider.ts";
 import { channelProviders } from "./channels/registry.ts";
 import { ChannelHub, isChannelService } from "./channels/service.ts";
+import { isSenderChannel, SENDER_CHANNELS, SENDERS_PAGE, type SenderChannel, SenderStore, senderScopeId } from "./senders.ts";
 import { CatalogCallError } from "./sources/catalog/http.ts";
 import { CatalogError, CatalogSource } from "./sources/catalog/source.ts";
 import { ComposioClient, ComposioError, type ComposioToolkit } from "./sources/composio/client.ts";
@@ -36,16 +38,18 @@ export const MCP_CALLBACK_PATH = "/oauth/mcp/callback";
 export const TEAMS_WEBHOOK_PATH = "/inbound/teams";
 
 /** Error constructor with the SDK `TbError` shape; main.ts passes the SDK class so thrown errors map to the envelope. */
-export type ErrorCtor = new (code: string, message: string, httpStatus?: number) => Error;
+export type ErrorCtor = new (code: string, message: string, httpStatus?: number, details?: Record<string, unknown>) => Error;
 
 export class ConnectError extends Error {
   readonly code: string;
   readonly httpStatus: number;
-  constructor(code: string, message: string, httpStatus = 400) {
+  readonly details: Record<string, unknown> | undefined;
+  constructor(code: string, message: string, httpStatus = 400, details?: Record<string, unknown>) {
     super(message);
     this.name = "ConnectError";
     this.code = code;
     this.httpStatus = httpStatus;
+    this.details = details;
   }
 }
 
@@ -94,12 +98,13 @@ interface Services {
   catalog: CatalogSource;
   mcp: McpSource;
   channels: ChannelHub;
+  senders: SenderStore;
 }
 
 export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
   const Err: ErrorCtor = env.ErrorClass ?? ConnectError;
-  const fail = (code: string, message: string, status = 400): never => {
-    throw new Err(code, message, status);
+  const fail = (code: string, message: string, status = 400, details?: Record<string, unknown>): never => {
+    throw new Err(code, message, status, details);
   };
   const policies = loadPolicies();
   const toolkitCache = new ToolkitCache();
@@ -173,7 +178,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       },
       ...(ctx.log ? { log: ctx.log } : {}),
     });
-    const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp, channels };
+    const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp, channels, senders: new SenderStore(db) };
     cache = { db, services: built };
     return built;
   };
@@ -228,6 +233,120 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     }
     return out;
   };
+
+
+  // ── callers and sender identities (C86, F20) ──
+
+  /** C86: an app caller with no workspace sender for this channel (409, not retryable; names the settings page). */
+  const noSender = (channel: SenderChannel): never =>
+    fail("no_sender_identity", `No workspace sender identity is set for ${channel}. Apps send only from it; the owner picks it in ${SENDERS_PAGE}.`, 409, {
+      retryable: false,
+      channel,
+    });
+  /** Ops that read or change an agent's own Buzz/chat state serve agents only; apps use the send ops. */
+  const agentOnly = (ctx: OpContext): string =>
+    ctx.caller.type === "agent"
+      ? ctx.caller.id
+      : fail("agent_only", "This operation serves agents only. Apps send from the workspace sender with buzz_post, buzz_dm_first, buzz_dm, channel_send, channel_reply, channel_dm_first or channel_dm.", 403);
+  /** F20: the calling agent's Buzz key, created on first use (no owner step, no call order to know). */
+  const buzzAgent = async (ctx: OpContext, s: Services): Promise<string> => {
+    const id = agentOnly(ctx);
+    const row = ctx.db.prepare("SELECT name FROM connect_agents WHERE id = ?").get(id);
+    await s.buzz.ensure({ id, name: row ? String(row.name) : ctx.caller.name });
+    return id;
+  };
+  interface SenderUsed {
+    /** key the Buzz relay signs with (agent id or WORKSPACE_SENDER) */
+    key: string;
+    kind: "agent" | "workspace";
+    /** "<channel>:<value>" (SDK-API §18) — recorded on the receipt */
+    handle: string;
+  }
+  /** Buzz send ops: an agent sends as itself; a companion app as the workspace sender (C86). */
+  const buzzSender = async (ctx: OpContext, s: Services): Promise<SenderUsed> => {
+    if (ctx.caller.type === "app") {
+      const identity = s.senders.get("buzz") ? s.buzz.get(WORKSPACE_SENDER) : null;
+      if (!identity) return noSender("buzz");
+      return { key: WORKSPACE_SENDER, kind: "workspace", handle: channelSenderId("buzz", identity.npub) };
+    }
+    const key = await buzzAgent(ctx, s);
+    const identity = s.buzz.get(key);
+    return { key, kind: "agent", handle: channelSenderId("buzz", identity?.npub ?? key) };
+  };
+  const senderMeta = (sender: { kind: "agent" | "workspace"; handle: string }) => ({
+    subjectKind: sender.kind === "workspace" ? "workspace_sender" : "as_itself",
+    sender: sender.handle,
+  });
+  const chatHandle = (s: Services, account: Account): string => channelSenderId(account.service, s.channels.bot(account.id)?.botId ?? account.externalRef ?? account.id);
+  /** Chat service an op targets from its `account` input: a channel account id, or (apps) the service name itself. */
+  const serviceOfInput = (value: unknown): ChannelServiceId | null => {
+    const v = str(value);
+    if (!v) return null;
+    if (isChannelService(v)) return v;
+    if (v.startsWith("sender:") && isChannelService(v.slice(7))) return v.slice(7) as ChannelServiceId;
+    const account = cache?.services.accounts.get(v);
+    return account?.source === "channel" && isChannelService(account.service) ? account.service : null;
+  };
+  /** Scope target of a chat SEND op: the agent's own account; for an app the shared `sender:<service>` instance. */
+  const sendScope = (input: Json, caller: Caller): string | null => {
+    const account = str(asInput(input).account) ?? null;
+    if (caller.type !== "app") return account;
+    const service = serviceOfInput(account);
+    return service ? senderScopeId(service) : account;
+  };
+  /** An agent's own chat account. `sender:*` scope rows (shared defaults) never let an agent use the workspace sender. */
+  const ownChannel = (ctx: OpContext, s: Services, raw: unknown): Account => {
+    const id = String(raw ?? "");
+    agentOnly(ctx);
+    if (id.startsWith("sender:")) fail("sender_reserved_for_apps", "The workspace sender is for companion apps only. Send from your own bot account.", 403);
+    return s.channels.account(id, ctx.caller.id);
+  };
+  /** Chat send ops: an agent sends from its own bot; a companion app from the workspace sender of that service (C86). */
+  const chatSender = (ctx: OpContext, s: Services, raw: unknown): { account: Account } & Omit<SenderUsed, "key"> => {
+    if (ctx.caller.type !== "app") {
+      const account = ownChannel(ctx, s, raw);
+      return { account, kind: "agent", handle: chatHandle(s, account) };
+    }
+    const service = serviceOfInput(raw) ?? fail("channel_account_unknown", "Give the chat service (slack, teams, telegram or discord) or a Connect channel account id.", 404);
+    const sender = s.senders.get(service);
+    const account = sender?.account ? s.accounts.get(sender.account) : null;
+    if (!sender || !account || account.source !== "channel" || account.status !== "connected") return noSender(service);
+    return { account, kind: "workspace", handle: chatHandle(s, account) };
+  };
+  /** identities_list rows (C81 G6): channel identity handles of agents only — never secrets, names or message data (C88). */
+  const identityRows = (s: Services, only: string | null): IdentityRow[] => {
+    const rows: IdentityRow[] = [];
+    for (const identity of s.buzz.list()) if (identity.agent.startsWith("agt_")) rows.push({ agent: identity.agent, channel: "buzz", identity: channelSenderId("buzz", identity.npub) });
+    for (const account of s.accounts.list({ status: "connected" }))
+      if (account.source === "channel" && account.ownerAgent) rows.push({ agent: account.ownerAgent, channel: account.service, identity: chatHandle(s, account) });
+    return rows.filter((r) => only === null || r.agent === only).sort((x, y) => (rowKey(x) < rowKey(y) ? -1 : rowKey(x) > rowKey(y) ? 1 : 0));
+  };
+  const senderView = (s: Services, channel: SenderChannel) => {
+    const row = s.senders.get(channel);
+    if (!row) return { channel, set: false, label: null, account: null, identity: null, setAt: null };
+    let identity: string | null = null;
+    if (channel === "buzz") {
+      const buzz = s.buzz.get(WORKSPACE_SENDER);
+      identity = buzz ? channelSenderId("buzz", buzz.npub) : null;
+    } else if (row.account) {
+      const account = s.accounts.get(row.account);
+      identity = account ? chatHandle(s, account) : null;
+    }
+    return { channel, set: true, label: row.label, account: row.account, identity, setAt: new Date(row.setAt).toISOString() };
+  };
+  const decodeCursor = (cursor: string): string => {
+    try {
+      const key = Buffer.from(cursor, "base64url").toString("utf8");
+      if (key.split("\u0000").length === 3) return key;
+    } catch {
+      // fall through
+    }
+    return fail("cursor_invalid", "cursor is not one this op returned.");
+  };
+  const firstContactHint = (ctx: OpContext, op: string): string =>
+    ctx.caller.type === "app"
+      ? `The workspace sender has not written to this person before. Call ${op} once (the owner approves first contact); later messages use the normal op.`
+      : `You have not written to this person before. Use ${op}; the owner approves first contact.`;
 
   const dynamicTools: DynamicHandlers = {
     async catalog(query: DynamicSearchInput | null, ctx): Promise<DynamicCatalogEntry[]> {
@@ -292,24 +411,32 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       },
     },
     async buzz_identity(_input, ctx) {
-      const s = services(ctx);
-      const identity = s.buzz.get(ctx.caller.id);
-      let relays: string[] = [];
-      try {
-        relays = s.buzz.relaysFor(ctx.caller.id);
-      } catch {
-        relays = [];
-      }
-      return { npub: identity?.npub ?? null, pubkey: identity?.pubkey ?? null, relay: relays[0] ?? null, relays };
+      return guard(async () => {
+        const s = services(ctx);
+        // F20: the first Buzz op creates the agent's identity, so this read always names it.
+        const agent = await buzzAgent(ctx, s);
+        const identity = s.buzz.get(agent);
+        let relays: string[] = [];
+        try {
+          relays = s.buzz.relaysFor(agent);
+        } catch {
+          relays = [];
+        }
+        return { npub: identity?.npub ?? null, pubkey: identity?.pubkey ?? null, relay: relays[0] ?? null, relays };
+      });
     },
 
     async buzz_channels(input, ctx) {
-      return guard(async () => services(ctx).relay.channels(ctx.caller.id, relaysArg(asInput(input).relays)));
+      return guard(async () => {
+        const s = services(ctx);
+        return s.relay.channels(await buzzAgent(ctx, s), relaysArg(asInput(input).relays));
+      });
     },
     async buzz_read(input, ctx) {
       return guard(async () => {
         const i = asInput(input);
-        const { messages, relays } = await services(ctx).relay.read(ctx.caller.id, {
+        const s = services(ctx);
+        const { messages, relays } = await s.relay.read(await buzzAgent(ctx, s), {
           channel: String(i.channel ?? ""),
           ...(typeof i.since === "number" ? { since: i.since } : {}),
           ...(typeof i.limit === "number" ? { limit: i.limit } : {}),
@@ -321,47 +448,55 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     async buzz_post(input, ctx) {
       return guard(async () => {
         const i = asInput(input);
+        const s = services(ctx);
+        const sender = await buzzSender(ctx, s);
         const channel = String(i.channel ?? "");
         const replyTo = str(i.replyTo);
         const root = str(i.threadRoot);
-        ctx.receipt.summary(`Buzz post to channel ${channel.slice(0, 8)}…`);
-        ctx.receipt.meta({ subjectKind: "as_itself", channel });
-        const posted = await services(ctx).relay.post(ctx.caller.id, {
+        ctx.receipt.summary(`Buzz post to channel ${channel.slice(0, 8)}…${sender.kind === "workspace" ? " as the workspace sender" : ""}`);
+        ctx.receipt.meta({ ...senderMeta(sender), channel });
+        const posted = await s.relay.post(sender.key, {
           channel,
           content: String(i.content ?? ""),
           ...(replyTo ? { replyTo: { id: replyTo, ...(root ? { root } : {}) } } : {}),
           ...relaysArg(i.relays),
         });
-        rememberBuzzSent(ctx.db, ctx.caller.id, posted.id, channel);
+        rememberBuzzSent(ctx.db, sender.key, posted.id, channel);
         return posted;
       });
     },
     async buzz_react(input, ctx) {
       return guard(async () => {
         const i = asInput(input);
+        const s = services(ctx);
+        const agent = await buzzAgent(ctx, s);
         ctx.receipt.summary("Buzz reaction");
-        return services(ctx).relay.react(ctx.caller.id, { channel: String(i.channel ?? ""), messageId: String(i.messageId ?? ""), emoji: String(i.emoji ?? ""), ...relaysArg(i.relays) });
+        return s.relay.react(agent, { channel: String(i.channel ?? ""), messageId: String(i.messageId ?? ""), emoji: String(i.emoji ?? ""), ...relaysArg(i.relays) });
       });
     },
     async buzz_edit(input, ctx) {
       return guard(async () => {
         const i = asInput(input);
+        const s = services(ctx);
+        const agent = await buzzAgent(ctx, s);
         const channel = String(i.channel ?? "");
         const messageId = String(i.messageId ?? "");
-        ownBuzzMessage(ctx.db, ctx.caller.id, messageId, fail);
+        ownBuzzMessage(ctx.db, agent, messageId, fail);
         ctx.receipt.summary("Buzz message edited");
-        return services(ctx).relay.edit(ctx.caller.id, { channel, messageId, content: String(i.content ?? ""), ...relaysArg(i.relays) });
+        return s.relay.edit(agent, { channel, messageId, content: String(i.content ?? ""), ...relaysArg(i.relays) });
       });
     },
     buzz_delete: {
       run: async (input, ctx) =>
         guard(async () => {
           const i = asInput(input);
+          const s = services(ctx);
+          const agent = await buzzAgent(ctx, s);
           const channel = String(i.channel ?? "");
           const messageId = String(i.messageId ?? "");
-          ownBuzzMessage(ctx.db, ctx.caller.id, messageId, fail);
-          const out = await services(ctx).relay.remove(ctx.caller.id, { channel, messageId, ...relaysArg(i.relays) });
-          ctx.db.prepare("DELETE FROM connect_buzz_sent WHERE agent = ? AND event_id = ?").run(ctx.caller.id, messageId);
+          ownBuzzMessage(ctx.db, agent, messageId, fail);
+          const out = await s.relay.remove(agent, { channel, messageId, ...relaysArg(i.relays) });
+          ctx.db.prepare("DELETE FROM connect_buzz_sent WHERE agent = ? AND event_id = ?").run(agent, messageId);
           ctx.receipt.summary("Buzz message deleted");
           return out;
         }),
@@ -370,50 +505,54 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     async buzz_schedule(input, ctx) {
       return guard(async () => {
         const i = asInput(input);
+        const s = services(ctx);
+        const agent = await buzzAgent(ctx, s);
         const channel = String(i.channel ?? "");
         const content = String(i.content ?? "").trim();
         const sendAt = Date.parse(String(i.sendAt ?? ""));
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(channel)) fail("buzz_channel_invalid", "channel must be a Buzz channel id.");
         if (!content) fail("buzz_content_invalid", "The message is empty.");
         if (!Number.isFinite(sendAt) || sendAt < Date.now() + 30_000 || sendAt > Date.now() + 30 * 86_400_000) fail("buzz_send_at_invalid", "sendAt must be an ISO time between 30 seconds and 30 days from now.");
-        if (!services(ctx).buzz.get(ctx.caller.id)) fail("buzz_identity_missing", "You have no Buzz identity yet. Ask the owner to create Buzz identities in Connect.", 409);
         const narrow = relaysArg(i.relays).relays;
-        const relays = services(ctx).buzz.relaysFor(ctx.caller.id, narrow);
+        const relays = s.buzz.relaysFor(agent, narrow);
         const id = newId("bsp");
         ctx.db
           .prepare("INSERT INTO connect_buzz_scheduled (id, agent, channel, content, send_at, status, created_at, relays) VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)")
-          .run(id, ctx.caller.id, channel, content, sendAt, Date.now(), narrow ? JSON.stringify(relays) : null);
+          .run(id, agent, channel, content, sendAt, Date.now(), narrow ? JSON.stringify(relays) : null);
         ctx.receipt.summary(`Buzz post scheduled for ${new Date(sendAt).toISOString()}`);
         return { id, sendAt: new Date(sendAt).toISOString() };
       });
     },
     async buzz_scheduled(_input, ctx) {
-      const posts = ctx.db
-        .prepare("SELECT id, channel, send_at, status, event_id, detail FROM connect_buzz_scheduled WHERE agent = ? ORDER BY send_at DESC LIMIT 100")
-        .all(ctx.caller.id)
-        .map((r) => ({ id: String(r.id), channel: String(r.channel), sendAt: new Date(Number(r.send_at)).toISOString(), status: String(r.status), eventId: r.event_id === null ? null : String(r.event_id), detail: String(r.detail) }));
-      return { posts };
+      return guard(async () => {
+        const posts = ctx.db
+          .prepare("SELECT id, channel, send_at, status, event_id, detail FROM connect_buzz_scheduled WHERE agent = ? ORDER BY send_at DESC LIMIT 100")
+          .all(agentOnly(ctx))
+          .map((r) => ({ id: String(r.id), channel: String(r.channel), sendAt: new Date(Number(r.send_at)).toISOString(), status: String(r.status), eventId: r.event_id === null ? null : String(r.event_id), detail: String(r.detail) }));
+        return { posts };
+      });
     },
     async buzz_schedule_cancel(input, ctx) {
       return guard(async () => {
         const id = String(asInput(input).id ?? "");
-        const r = ctx.db.prepare("UPDATE connect_buzz_scheduled SET status = 'cancelled' WHERE id = ? AND agent = ? AND status = 'scheduled'").run(id, ctx.caller.id);
+        const r = ctx.db.prepare("UPDATE connect_buzz_scheduled SET status = 'cancelled' WHERE id = ? AND agent = ? AND status = 'scheduled'").run(id, agentOnly(ctx));
         if (r.changes === 0) fail("buzz_scheduled_unknown", "No scheduled post of yours with that id is waiting.", 404);
         return { ok: true };
       });
     },
 
-    // ── chat channels (agent) ──
+    // ── chat channels (agent; the send ops also serve companion apps through the workspace sender, C86) ──
     channel_inbox: {
       scope: (input) => str(asInput(input).account) ?? null,
       run: async (input, ctx) =>
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
+          const agent = agentOnly(ctx);
           const readable = new Set(await ctx.scope.readable(PRODUCT_SCOPE));
           const mine = s.accounts
             .list({ status: "connected" })
-            .filter((a) => a.source === "channel" && a.ownerAgent === ctx.caller.id && readable.has(a.id) && (!str(i.account) || a.id === str(i.account)));
+            .filter((a) => a.source === "channel" && a.ownerAgent === agent && readable.has(a.id) && (!str(i.account) || a.id === str(i.account)));
           const out = s.channels.inbox(mine.map((a) => a.id), typeof i.sinceSeq === "number" ? i.sinceSeq : 0, typeof i.limit === "number" ? i.limit : 50);
           return { ...out, untrusted: true } as unknown as Json;
         }),
@@ -423,45 +562,45 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       run: async (input, ctx) =>
         guard(async () => {
           const s = services(ctx);
-          const account = s.channels.account(String(asInput(input).account ?? ""), ctx.caller.id);
+          const account = ownChannel(ctx, s, asInput(input).account);
           await s.channels.refreshConversations(account).catch(() => undefined);
           return { conversations: s.channels.conversations(account.id) };
         }),
     },
     channel_send: {
-      scope: (input) => str(asInput(input).account) ?? null,
+      scope: sendScope,
       run: async (input, ctx) =>
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
-          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
-          ctx.receipt.summary(`${account.service} post via ${account.label}`);
-          ctx.receipt.meta({ subjectKind: "as_itself", service: account.service, account: account.label });
+          const { account, ...sender } = chatSender(ctx, s, i.account);
+          ctx.receipt.summary(`${account.service} post via ${account.label}${sender.kind === "workspace" ? " (workspace sender)" : ""}`);
+          ctx.receipt.meta({ ...senderMeta(sender), service: account.service, account: account.label });
           return s.channels.send(account, ctx.caller.id, { conversation: String(i.conversation ?? ""), text: String(i.text ?? ""), threadId: str(i.threadId) ?? null });
         }),
       redact: (input) => `Chat post to ${String(asInput(input).conversation ?? "").slice(-40)}`,
     },
     channel_reply: {
-      scope: (input) => str(asInput(input).account) ?? null,
+      scope: sendScope,
       run: async (input, ctx) =>
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
-          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
-          ctx.receipt.summary(`${account.service} reply via ${account.label}`);
-          ctx.receipt.meta({ subjectKind: "as_itself", service: account.service, account: account.label });
+          const { account, ...sender } = chatSender(ctx, s, i.account);
+          ctx.receipt.summary(`${account.service} reply via ${account.label}${sender.kind === "workspace" ? " (workspace sender)" : ""}`);
+          ctx.receipt.meta({ ...senderMeta(sender), service: account.service, account: account.label });
           return s.channels.reply(account, ctx.caller.id, { seq: Number(i.seq ?? 0), text: String(i.text ?? "") });
         }),
     },
     channel_dm_first: {
-      scope: (input) => str(asInput(input).account) ?? null,
+      scope: sendScope,
       run: async (input, ctx) =>
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
-          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
-          ctx.receipt.summary(`First ${account.service} DM via ${account.label}`);
-          ctx.receipt.meta({ subjectKind: "as_itself", service: account.service, person: String(i.person ?? "").slice(-60) });
+          const { account, ...sender } = chatSender(ctx, s, i.account);
+          ctx.receipt.summary(`First ${account.service} DM via ${account.label}${sender.kind === "workspace" ? " (workspace sender)" : ""}`);
+          ctx.receipt.meta({ ...senderMeta(sender), service: account.service, account: account.label, person: String(i.person ?? "").slice(-60) });
           return s.channels.directMessage(account, ctx.caller.id, { person: String(i.person ?? ""), text: String(i.text ?? ""), first: true });
         }),
       holdView: (input) => {
@@ -470,14 +609,20 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       },
     },
     channel_dm: {
-      scope: (input) => str(asInput(input).account) ?? null,
+      scope: sendScope,
       run: async (input, ctx) =>
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
-          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
-          ctx.receipt.summary(`${account.service} DM via ${account.label}`);
-          return s.channels.directMessage(account, ctx.caller.id, { person: String(i.person ?? ""), text: String(i.text ?? ""), first: false });
+          const { account, ...sender } = chatSender(ctx, s, i.account);
+          ctx.receipt.summary(`${account.service} DM via ${account.label}${sender.kind === "workspace" ? " (workspace sender)" : ""}`);
+          ctx.receipt.meta({ ...senderMeta(sender), service: account.service, account: account.label });
+          try {
+            return await s.channels.directMessage(account, ctx.caller.id, { person: String(i.person ?? ""), text: String(i.text ?? ""), first: false });
+          } catch (error) {
+            if (error instanceof ChannelError && error.code === "channel_first_contact_required") fail(error.code, firstContactHint(ctx, "channel_dm_first"), 409);
+            throw error;
+          }
         }),
     },
     channel_edit: {
@@ -486,7 +631,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
-          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          const account = ownChannel(ctx, s, i.account);
           await s.channels.edit(account, { conversation: String(i.conversation ?? ""), messageId: String(i.messageId ?? ""), text: String(i.text ?? "") });
           ctx.receipt.summary(`${account.service} message edited`);
           return { ok: true };
@@ -498,7 +643,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
-          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          const account = ownChannel(ctx, s, i.account);
           await s.channels.delete(account, { conversation: String(i.conversation ?? ""), messageId: String(i.messageId ?? "") });
           ctx.receipt.summary(`${account.service} message deleted`);
           return { ok: true };
@@ -511,7 +656,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
-          const account = s.channels.account(String(i.account ?? ""), ctx.caller.id);
+          const account = ownChannel(ctx, s, i.account);
           await s.channels.react(account, { conversation: String(i.conversation ?? ""), messageId: String(i.messageId ?? ""), emoji: String(i.emoji ?? "") });
           ctx.receipt.summary(`${account.service} reaction`);
           return { ok: true };
@@ -523,11 +668,12 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         guard(async () => {
           const i = asInput(input);
           const s = services(ctx);
-          const sent = await s.relay.directMessage(ctx.caller.id, { to: String(i.to ?? ""), content: String(i.content ?? ""), ...relaysArg(i.relays) });
-          rememberContact(ctx.db, ctx.caller.id, sent);
-          for (const one of sent.sent) rememberBuzzSent(ctx.db, ctx.caller.id, one.id, one.channel);
-          ctx.receipt.summary(`First Buzz DM to ${shortKey(sent.to)}`);
-          ctx.receipt.meta({ subjectKind: "as_itself", to: sent.to, channel: sent.channel });
+          const sender = await buzzSender(ctx, s);
+          const sent = await s.relay.directMessage(sender.key, { to: String(i.to ?? ""), content: String(i.content ?? ""), ...relaysArg(i.relays) });
+          rememberContact(ctx.db, sender.key, sent);
+          for (const one of sent.sent) rememberBuzzSent(ctx.db, sender.key, one.id, one.channel);
+          ctx.receipt.summary(`First Buzz DM to ${shortKey(sent.to)}${sender.kind === "workspace" ? " as the workspace sender" : ""}`);
+          ctx.receipt.meta({ ...senderMeta(sender), to: sent.to, channel: sent.channel });
           return { id: sent.id, channel: sent.channel, to: sent.to, relays: sent.relays };
         }),
       holdView: (input) => {
@@ -544,15 +690,35 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           const s = services(ctx);
           const to = parsePubkey(String(i.to ?? ""));
           if (!to) fail("buzz_recipient_invalid", "Give the person's Buzz key as npub1… or 64 hex.");
-          const known = ctx.db.prepare("SELECT 1 FROM connect_buzz_contacts WHERE agent = ? AND pubkey = ?").get(ctx.caller.id, to);
-          if (!known) fail("buzz_first_contact_required", "You have not written to this person before. Use buzz_dm_first; the owner approves first contact.", 409);
-          const sent = await s.relay.directMessage(ctx.caller.id, { to: to as string, content: String(i.content ?? ""), ...relaysArg(i.relays) });
-          for (const one of sent.sent) rememberBuzzSent(ctx.db, ctx.caller.id, one.id, one.channel);
-          ctx.receipt.summary(`Buzz DM to ${shortKey(sent.to)}`);
-          ctx.receipt.meta({ subjectKind: "as_itself", to: sent.to, channel: sent.channel });
+          const sender = await buzzSender(ctx, s);
+          const known = ctx.db.prepare("SELECT 1 FROM connect_buzz_contacts WHERE agent = ? AND pubkey = ?").get(sender.key, to);
+          if (!known) fail("buzz_first_contact_required", firstContactHint(ctx, "buzz_dm_first"), 409);
+          const sent = await s.relay.directMessage(sender.key, { to: to as string, content: String(i.content ?? ""), ...relaysArg(i.relays) });
+          for (const one of sent.sent) rememberBuzzSent(ctx.db, sender.key, one.id, one.channel);
+          ctx.receipt.summary(`Buzz DM to ${shortKey(sent.to)}${sender.kind === "workspace" ? " as the workspace sender" : ""}`);
+          ctx.receipt.meta({ ...senderMeta(sender), to: sent.to, channel: sent.channel });
           return { id: sent.id, channel: sent.channel, to: sent.to, relays: sent.relays };
         }),
       redact: (input) => `Buzz DM to ${shortKey(String(asInput(input).to ?? ""))}`,
+    },
+
+    // ── agent identities for Fleet (C81 G6; C88: identity handles only) ──
+    async identities_list(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const i = asInput(input);
+        const wanted = str(i.agent);
+        // An agent sees only its own rows; a companion app (Fleet's grant) sees every agent of the workspace.
+        const only = ctx.caller.type === "agent" ? ctx.caller.id : (wanted ?? null);
+        if (ctx.caller.type === "agent" && wanted && wanted !== ctx.caller.id) return { identities: [], nextCursor: null };
+        const rows = identityRows(s, only);
+        const after = str(i.cursor) ? decodeCursor(String(i.cursor)) : null;
+        const start = after ? rows.findIndex((r) => rowKey(r) > after) : 0;
+        const page = start < 0 ? [] : rows.slice(start, start + IDENTITIES_PAGE);
+        const last = page.at(-1);
+        const more = start >= 0 && start + IDENTITIES_PAGE < rows.length;
+        return { identities: page, nextCursor: more && last ? encodeCursor(rowKey(last)) : null };
+      });
     },
 
     // ── person ops (app UI through the bridge launch) ──
@@ -800,6 +966,56 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         return { published, failed };
       });
     },
+
+    // ── workspace sender identities (C86; person ops, Connect → Senders) ──
+    async sender_identities_list(_input, ctx) {
+      const s = services(ctx);
+      const senders = SENDER_CHANNELS.map((channel) => senderView(s, channel));
+      const candidates = s.accounts
+        .list({ status: "connected" })
+        .filter((a) => a.source === "channel")
+        .map((a) => ({ id: a.id, service: a.service, label: a.label }));
+      return { senders, candidates } as unknown as Json;
+    },
+    async sender_identity_set(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const i = asInput(input);
+        const channel = str(i.channel) ?? "";
+        if (!isSenderChannel(channel)) fail("sender_channel_unknown", "Pick buzz, slack, teams, telegram or discord.");
+        if (channel === "buzz") {
+          const label = cleanLabel(str(i.label) ?? "Workspace");
+          // A Buzz identity created for the workspace sender (kept on later changes; cleared with the sender).
+          await s.buzz.ensure({ id: WORKSPACE_SENDER, name: label });
+          s.senders.set("buzz", null, label);
+        } else {
+          const id = str(i.account) ?? fail("account_required", `Pick the ${channel} bot apps send from.`);
+          const account = s.accounts.get(id);
+          if (account?.source !== "channel" || account.service !== channel) fail("account_unknown", `No ${channel} bot with that id is connected in Connect.`, 404);
+          if (account?.status !== "connected") fail("channel_account_not_connected", "This bot is not connected. Connect it again first.", 409);
+          s.senders.set(channel as ChannelServiceId, id, (account as Account).label);
+          // Companion apps reach it through the shared `sender:<service>` scope instance (manifest defaultGrants shared).
+          await extras(ctx).scopes.instances.create(PRODUCT_SCOPE, senderScopeId(channel as ChannelServiceId), `Workspace sender for apps only (${channel})`, { shared: true });
+        }
+        return { sender: senderView(s, channel as SenderChannel) } as unknown as Json;
+      });
+    },
+    async sender_identity_clear(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const channel = str(asInput(input).channel) ?? "";
+        if (!isSenderChannel(channel)) fail("sender_channel_unknown", "Pick buzz, slack, teams, telegram or discord.");
+        const cleared = s.senders.clear(channel as SenderChannel);
+        if (channel === "buzz") {
+          await s.buzz.remove(WORKSPACE_SENDER);
+          ctx.db.prepare("DELETE FROM connect_buzz_contacts WHERE agent = ?").run(WORKSPACE_SENDER);
+          ctx.db.prepare("DELETE FROM connect_buzz_sent WHERE agent = ?").run(WORKSPACE_SENDER);
+        } else {
+          await extras(ctx).scopes.instances.create(PRODUCT_SCOPE, senderScopeId(channel as ChannelServiceId), `Workspace sender for apps only (${channel}, not set)`, { shared: false });
+        }
+        return { cleared };
+      });
+    },
   };
 
   const composioCallback: PublicHandler = async (req, rawCtx) => {
@@ -880,6 +1096,16 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
   };
 }
 
+type IdentityRow = {
+  agent: string;
+  channel: string;
+  /** "<channel>:<value>" (SDK-API §18): Buzz npub, Slack/Teams/Discord bot user id, Telegram numeric bot id */
+  identity: string;
+};
+const IDENTITIES_PAGE = 200;
+const rowKey = (r: IdentityRow): string => `${r.agent}\u0000${r.channel}\u0000${r.identity}`;
+const encodeCursor = (key: string): string => Buffer.from(key, "utf8").toString("base64url");
+
 function callbackPage(ok: boolean, title: string, detail: string, status: number): Response {
   return new Response(
     `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;padding:2rem"><h1>${title}</h1><p>${detail}</p><p>You can close this window.</p><script>window.opener&&window.opener.postMessage({connect:${ok ? "true" : "false"}},"*")</script></body>`,
@@ -940,6 +1166,10 @@ function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
 
 function shortKey(key: string): string {
   return key.length > 16 ? `${key.slice(0, 12)}…${key.slice(-4)}` : key;
+}
+
+function cleanLabel(value: string): string {
+  return value.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 80) || "Workspace";
 }
 
 function escapeHtml(value: string): string {

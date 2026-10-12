@@ -38,8 +38,27 @@ export type BuzzMessage = {
   content: string;
   createdAt: number;
   threadId: string | null;
+  /** F15: mentioned people as `buzz:npub1…` (SDK-API §18): `p` tags and `nostr:npub1…` references in the text */
+  mentions: string[];
+  /** F15: true when the reading agent's own npub is mentioned (a runner can wake on these only) */
+  mentionsMe: boolean;
 };
 
+/** F15: pubkeys (hex) an event mentions: valid `p` tags plus `nostr:npub1…` references in the content; at most 50. */
+export function mentionedPubkeys(event: NostrEvent): string[] {
+  const out = new Set<string>();
+  for (const t of event.tags) if (t[0] === "p" && typeof t[1] === "string" && /^[0-9a-f]{64}$/u.test(t[1])) out.add(t[1]);
+  for (const m of event.content.matchAll(/nostr:(npub1[02-9ac-hj-np-z]{58})/gu)) {
+    const key = parsePubkey(m[1] as string);
+    if (key) out.add(key);
+  }
+  return [...out].slice(0, 50);
+}
+
+const mentionsOf = (event: NostrEvent, self: string): { mentions: string[]; mentionsMe: boolean } => {
+  const keys = mentionedPubkeys(event);
+  return { mentions: keys.map((k) => `buzz:${npubEncode(k)}`), mentionsMe: keys.includes(self) };
+};
 const tag = (event: NostrEvent, name: string) => event.tags.find((t) => t[0] === name)?.[1];
 const hasFlag = (event: NostrEvent, name: string) => event.tags.some((t) => t[0] === name && t.length === 1);
 
@@ -230,6 +249,7 @@ export class BuzzRelay {
         content: cleanText(e.content),
         createdAt: e.created_at,
         threadId: e.tags.find((t) => t[0] === "e" && t[3] === "root")?.[1] ?? null,
+        ...mentionsOf(e, identity.pubkey),
       }));
     return { messages, relays };
   }

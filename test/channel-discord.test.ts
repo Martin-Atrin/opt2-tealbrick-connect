@@ -183,6 +183,7 @@ test("discord: parseDiscordMessage normalises MESSAGE_CREATE and ignores bots an
     senderName: "Ada (ops)",
     text: "can the agent check the build?\n[attachment: build.log]",
     sentAt: Date.parse("2026-10-12T09:01:02.345Z"),
+    mentions: [],
   });
   assert.equal(parseDiscordMessage(gw.messageOtherBot.d, ids, 1), null);
   assert.equal(parseDiscordMessage(gw.messageOwn.d, ids, 1), null);

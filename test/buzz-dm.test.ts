@@ -8,7 +8,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 
 import { type ConnectError, createConnectApp } from "../src/app.ts";
 import { generateSecretKey, type NostrEvent, npubEncode, parsePubkey, publicKeyOf, verifyEvent } from "../src/channels/buzz/nostr.ts";
-import { fakeFetch, handlerOf, root, testCtx, testDb } from "./helpers.ts";
+import { eventCtx, fakeFetch, handlerOf, root, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const DM_CHANNEL = "5a7d6c2e-1f3a-4c5b-9d8e-7f6a5b4c3d2e";
@@ -49,7 +49,7 @@ test("first DM opens the conversation (kind 41010) and posts (kind 9); later DMs
     buzzRelayUrl: "wss://relay.test.example",
     allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"],
   });
-  await app.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "Agent", mode: "free", status: "active" }, { db, scopes: null as never, log: testCtx({ db }).log });
+  await app.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "Agent", mode: "free", status: "active" }, eventCtx(db));
   await handlerOf(app, "buzz_identities_generate")({}, testCtx({ db, person: true }));
   const person = publicKeyOf(generateSecretKey());
   const ctx = testCtx({ db, agent: AGENT });

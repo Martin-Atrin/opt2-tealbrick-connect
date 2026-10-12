@@ -31,6 +31,7 @@ import {
   type ChannelProvider,
   cleanInboundText,
   type InboundMessage,
+  mentionList,
   scrub,
 } from "../provider.ts";
 
@@ -499,6 +500,19 @@ function inboundText(activity: Record<string, unknown>, botId: string): string {
   return cleanInboundText(text.replace(/[ \t]{2,}/gu, " ").trim());
 }
 
+/** F15: ids of `mention` entities (Bot Framework ids; the bot is `28:<appId>`), lower-case like the bot id. */
+function teamsMentions(activity: Record<string, unknown>): string[] {
+  const entities = Array.isArray(activity.entities) ? activity.entities : [];
+  return mentionList(
+    entities
+      .map((raw) => asRecord(raw))
+      .filter((e) => e?.type === "mention")
+      .map((e) => asRecord(e?.mentioned)?.id)
+      .filter((id): id is string => typeof id === "string" && SENDER_ID.test(id))
+      .map((id) => id.toLowerCase()),
+  );
+}
+
 function parseMessage(activity: Record<string, unknown>, c: TeamsCreds, net: ChannelNet): InboundMessage | null {
   const botId = `28:${c.appId}`;
   const serviceUrl = activity.serviceUrl as string;
@@ -536,6 +550,7 @@ function parseMessage(activity: Record<string, unknown>, c: TeamsCreds, net: Cha
     senderName,
     text: inboundText(activity, botId),
     sentAt: Number.isFinite(sent) ? sent : net.now(),
+    mentions: teamsMentions(activity),
   };
 }
 

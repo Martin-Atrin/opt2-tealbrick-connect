@@ -10,7 +10,7 @@ import { type ConnectError, createConnectApp, runDueBuzzPosts } from "../src/app
 import { BuzzIdentities } from "../src/channels/buzz/identity.ts";
 import { type NostrEvent, verifyEvent } from "../src/channels/buzz/nostr.ts";
 import { BuzzRelay } from "../src/channels/buzz/relay.ts";
-import { fakeFetch, handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
+import { eventCtx, fakeFetch, handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const CHANNEL = "0b7d6c2e-1f3a-4c5b-9d8e-7f6a5b4c3d2e";
@@ -29,7 +29,7 @@ async function setup() {
   });
   const db = testDb();
   const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), fetchImpl: relay.impl, buzzRelayUrl: RELAY, allowRelayOrigins: ORIGINS });
-  await app.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "A", mode: "free", status: "active" }, { db, scopes: null as never, log: testCtx({ db }).log });
+  await app.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "A", mode: "free", status: "active" }, eventCtx(db));
   await handlerOf(app, "buzz_identities_generate")({}, testCtx({ db, person: true }));
   return { db, app, events, relay, ctx: testCtx({ db, agent: AGENT }) };
 }

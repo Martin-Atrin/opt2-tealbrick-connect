@@ -34,6 +34,10 @@ export interface InboxRow {
   sender: { id: string; name: string };
   text: string;
   sentAt: number;
+  /** F15: `<service>:<user id>` handles this message mentions (SDK-API §18 format) */
+  mentions: string[];
+  /** F15: true when the message mentions this connection's bot (the agent); a runner can wake on these only */
+  mentionsMe: boolean;
 }
 
 export interface ChannelDeps {
@@ -46,6 +50,16 @@ export interface ChannelDeps {
 }
 
 type BotRow = BotIdentity & { settings: Record<string, string>; inboundState: string; inboundDetail: string };
+
+function parseMentions(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  try {
+    const list = JSON.parse(value) as unknown;
+    return Array.isArray(list) ? list.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 export function isChannelService(value: string): value is ServiceId {
   return (CHANNEL_SERVICES as readonly string[]).includes(value);
@@ -168,10 +182,10 @@ export class ChannelHub {
     this.#rememberConversation(account.id, m.conversation, m.conversationName ?? m.conversation, m.conversationType);
     const r = this.#d.db
       .prepare(
-        `INSERT OR IGNORE INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, thread_id, sender_id, sender_name, text, sent_at, received_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, thread_id, sender_id, sender_name, text, sent_at, received_at, mentions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(account.id, m.conversation, m.conversationType, m.messageId, m.threadId, m.senderId, m.senderName.slice(0, 120), m.text, m.sentAt, Date.now());
+      .run(account.id, m.conversation, m.conversationType, m.messageId, m.threadId, m.senderId, m.senderName.slice(0, 120), m.text, m.sentAt, Date.now(), JSON.stringify(m.mentions ?? []));
     return r.changes > 0;
   }
 
@@ -184,7 +198,11 @@ export class ChannelHub {
          WHERE i.account_id IN (${placeholders}) AND i.seq > ? ORDER BY i.seq LIMIT ?`,
       )
       .all(...accountIds, sinceSeq, Math.max(1, Math.min(limit, 100)));
-    const messages = rows.map((r) => ({
+    const botIds = new Map(accountIds.map((id) => [id, this.bot(id)?.botId.toLowerCase() ?? null]));
+    const messages = rows.map((r) => {
+      const ids = parseMentions(r.mentions);
+      const bot = botIds.get(String(r.account_id)) ?? null;
+      return {
       seq: Number(r.seq),
       account: String(r.account_id),
       service: String(r.service),
@@ -195,7 +213,10 @@ export class ChannelHub {
       sender: { id: String(r.sender_id), name: String(r.sender_name) },
       text: String(r.text),
       sentAt: Number(r.sent_at),
-    }));
+      mentions: ids.map((id) => `${String(r.service)}:${id}`),
+      mentionsMe: bot !== null && ids.some((id) => id.toLowerCase() === bot),
+      };
+    });
     return { messages, nextSeq: messages.at(-1)?.seq ?? sinceSeq };
   }
 

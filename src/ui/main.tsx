@@ -8,11 +8,12 @@ import { Notice } from "./components.tsx";
 import { Accounts } from "./pages/Accounts.tsx";
 import { Buzz } from "./pages/Buzz.tsx";
 import { Chat } from "./pages/Chat.tsx";
+import { Senders } from "./pages/Senders.tsx";
 import { Services } from "./pages/Services.tsx";
 import { Agents, Backups, Holds, Keys, Receipts } from "./pages/Standard.tsx";
 import { ROUTES, type Route, useRoute } from "./router.ts";
 
-const PAGES = [{ id: "services", label: "Services" }, { id: "accounts", label: "Accounts" }, { id: "buzz", label: "Buzz" }, { id: "chat", label: "Chat bots" }, ...STANDARD_PAGES];
+const PAGES = [{ id: "services", label: "Services" }, { id: "accounts", label: "Accounts" }, { id: "buzz", label: "Buzz" }, { id: "chat", label: "Chat bots" }, { id: "senders", label: "Senders" }, ...STANDARD_PAGES];
 
 function Page({ route, go }: { route: Route; go(route: Route): void }) {
   switch (route) {
@@ -24,6 +25,8 @@ function Page({ route, go }: { route: Route; go(route: Route): void }) {
       return <Buzz />;
     case "chat":
       return <Chat />;
+    case "senders":
+      return <Senders />;
     case "holds":
       return <Holds />;
     case "receipts":

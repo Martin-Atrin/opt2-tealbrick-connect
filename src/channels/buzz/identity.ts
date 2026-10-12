@@ -19,6 +19,11 @@ import { BuzzRefusal, MAX_RELAYS, normalizeRelayUrl, type RelayList, workspaceRe
 export { normalizeRelayUrl } from "./relays.ts";
 
 const SECRET_PREFIX = "buzz:";
+/**
+ * Key of the workspace sender identity (C86): the Buzz identity companion APPS send from. Not an agent id (agents are
+ * `agt_…`), so it never collides; the owner creates and clears it in Connect → Senders.
+ */
+export const WORKSPACE_SENDER = "workspace";
 const NAME_MAX = 80;
 
 export interface AgentRef {
@@ -65,6 +70,8 @@ function view(row: Record<string, unknown>): BuzzIdentityView {
   };
 }
 
+const ensuring = new Map<string, Promise<BuzzIdentityView>>();
+
 export class BuzzIdentities {
   readonly #d: BuzzDeps;
 
@@ -109,6 +116,30 @@ export class BuzzIdentities {
       created: all.filter((i) => createdIds.includes(i.agent)),
       existing: all.filter((i) => !createdIds.includes(i.agent)),
     };
+  }
+
+  /**
+   * F20: the identity of one agent (or the workspace sender), created on first use when it has none. Buzz ops call this,
+   * so an agent never meets `buzz_identity_missing` and never needs to know an order of calls.
+   */
+  async ensure(agent: AgentRef): Promise<BuzzIdentityView> {
+    const existing = this.get(agent.id);
+    if (existing) return existing;
+    // One creation per key at a time (one process): two first calls in parallel must not seal two keys.
+    const pending = ensuring.get(agent.id);
+    if (pending) return pending;
+    const run = (async () => {
+      const { created, existing: raced } = await this.generateAll([agent]);
+      const identity = created[0] ?? raced[0] ?? this.get(agent.id);
+      if (!identity) throw new BuzzRefusal("buzz_identity_missing", "Connect could not create a Buzz identity. Try again.", 500);
+      return identity;
+    })();
+    ensuring.set(agent.id, run);
+    try {
+      return await run;
+    } finally {
+      ensuring.delete(agent.id);
+    }
   }
 
   async rotate(agent: AgentRef): Promise<BuzzIdentityView> {

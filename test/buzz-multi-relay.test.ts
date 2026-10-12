@@ -13,7 +13,7 @@ import { BuzzIdentities } from "../src/channels/buzz/identity.ts";
 import { eventId, generateSecretKey, type NostrEvent, npubEncode, publicKeyOf, signEvent, verifyEvent } from "../src/channels/buzz/nostr.ts";
 import { BuzzRelay } from "../src/channels/buzz/relay.ts";
 import { MAX_RELAYS, normalizeRelayUrl, type RelayOutcome, workspaceRelayList } from "../src/channels/buzz/relays.ts";
-import { handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
+import { eventCtx, handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const CHANNEL = "0b7d6c2e-1f3a-4c5b-9d8e-7f6a5b4c3d2e";
@@ -62,7 +62,7 @@ async function app(input: { relays?: string; legacy?: string; modes?: Record<str
     ...(input.relays !== undefined ? { buzzRelays: input.relays } : {}),
     ...(input.legacy !== undefined ? { buzzRelayUrl: input.legacy } : {}),
   });
-  await connect.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "Multi", mode: "free", status: "active" }, { db, scopes: null as never, log: testCtx({ db }).log });
+  await connect.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "Multi", mode: "free", status: "active" }, eventCtx(db));
   await handlerOf(connect, "buzz_identities_generate")({}, testCtx({ db, person: true }));
   const call = (op: string, body: Json) => handlerOf(connect, op)(body, testCtx({ db, agent: AGENT }));
   const owner = (op: string, body: Json) => handlerOf(connect, op)(body, testCtx({ db, person: true }));

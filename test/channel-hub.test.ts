@@ -8,7 +8,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { AccountStore } from "../src/accounts.ts";
 import { type ConnectError, createConnectApp } from "../src/app.ts";
 import { ChannelError, type ChannelNet, type ChannelProvider, type InboundMessage, type InboundSink } from "../src/channels/provider.ts";
-import { handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
+import { eventCtx, handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const AGENT = "agt_01CHANAGENT000000000000000";
@@ -55,7 +55,7 @@ async function setup() {
   const w = fakeWorld();
   const db = testDb();
   const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), channelProviders: new Map([["telegram", w.provider]]), channelNet: w.net });
-  for (const id of [AGENT, OTHER]) await app.events?.agentAdded?.({ id: id as `agt_${string}`, name: id, mode: "free", status: "active" }, { db, scopes: null as never, log: testCtx({ db }).log });
+  for (const id of [AGENT, OTHER]) await app.events?.agentAdded?.({ id: id as `agt_${string}`, name: id, mode: "free", status: "active" }, eventCtx(db));
   const person = testCtx({ db, person: true });
   return { w, db, app, person };
 }

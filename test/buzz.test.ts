@@ -10,7 +10,7 @@ import { createConnectApp } from "../src/app.ts";
 import { BuzzIdentities, normalizeRelayUrl } from "../src/channels/buzz/identity.ts";
 import { eventId, KindNotAllowedError, npubEncode, publicKeyOf, signEvent, verifyEvent } from "../src/channels/buzz/nostr.ts";
 import { BuzzRelay } from "../src/channels/buzz/relay.ts";
-import { fakeFetch, handlerOf, memorySecrets, root, secretsFor, testCtx, testDb } from "./helpers.ts";
+import { eventCtx, fakeFetch, handlerOf, memorySecrets, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const agents = Array.from({ length: 16 }, (_, i) => ({ id: `agt_01AGENT${String(i).padStart(19, "0")}`, name: `Agent ${i + 1}` }));
@@ -38,7 +38,7 @@ test("J3: one owner action creates identities for 16 agents; a second run change
     migrationsDir: join(root, "migrations"),
   });
   for (const agent of agents) {
-    await app.events?.agentAdded?.({ ...agent, id: agent.id as `agt_${string}`, mode: "free", status: "active" }, { db, scopes: null as never, log: testCtx({ db }).log });
+    await app.events?.agentAdded?.({ ...agent, id: agent.id as `agt_${string}`, mode: "free", status: "active" }, eventCtx(db));
   }
   const ctx = testCtx({ db });
   const first = (await handlerOf(app, "buzz_identities_generate")({}, ctx)) as { created: { agent: string; npub: string; pubkey: string }[]; existing: unknown[] };
@@ -56,8 +56,10 @@ test("J3: one owner action creates identities for 16 agents; a second run change
   // The agent reads only its own identity.
   const mine = (await handlerOf(app, "buzz_identity")({}, testCtx({ db, agent: agents[3]?.id ?? "" }))) as { npub: string };
   assert.equal(mine.npub, first.created.find((i) => i.agent === agents[3]?.id)?.npub);
-  const stranger = (await handlerOf(app, "buzz_identity")({}, testCtx({ db, agent: "agt_01NOBODY00000000000000000" }))) as { npub: null };
-  assert.equal(stranger.npub, null);
+  // F20: an agent without an identity gets one on its first Buzz op (here the read), never buzz_identity_missing.
+  const late = (await handlerOf(app, "buzz_identity")({}, testCtx({ db, agent: "agt_01NOBODY00000000000000000" }))) as { npub: string };
+  assert.match(late.npub, /^npub1/u);
+  assert.equal(secretsFor(db).names().length, 17);
 });
 
 test("rotation replaces the key; removal deletes the sealed key", async () => {

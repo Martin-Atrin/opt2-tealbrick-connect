@@ -214,6 +214,7 @@ test("telegram: parseTelegramUpdate normalises messages and ignores bots", () =>
     senderName: "Ada Lovelace",
     text: "hello bot!",
     sentAt: 1760000000000,
+    mentions: [],
   });
   assert.equal(parseTelegramUpdate(botMsg, bot, now), null);
   assert.equal(parseTelegramUpdate(memberUpdate, bot, now), null);

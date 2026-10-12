@@ -130,3 +130,18 @@ export const channelProviders = () => callOp<{ services: ChannelProviderInfo[]; 
 export const channelAccounts = () => callOp<{ accounts: ChannelAccountInfo[] }>("channel_accounts", {});
 export const channelAccountConnect = (input: { service: string; label: string; agent: string; credentials: Record<string, string>; settings?: Record<string, string | boolean> }) =>
   callOp<{ account: Account }>("channel_account_connect", input);
+
+/** C86: the identity companion apps send from, per channel. */
+export type SenderChannel = "buzz" | "slack" | "teams" | "telegram" | "discord";
+export interface SenderInfo {
+  channel: SenderChannel;
+  set: boolean;
+  label: string | null;
+  account: string | null;
+  /** "<channel>:<value>" */
+  identity: string | null;
+  setAt: string | null;
+}
+export const senderIdentitiesList = () => callOp<{ senders: SenderInfo[]; candidates: { id: string; service: string; label: string }[] }>("sender_identities_list", {});
+export const senderIdentitySet = (input: { channel: SenderChannel; account?: string; label?: string }) => callOp<{ sender: SenderInfo }>("sender_identity_set", input);
+export const senderIdentityClear = (channel: SenderChannel) => callOp<{ cleared: boolean }>("sender_identity_clear", { channel });

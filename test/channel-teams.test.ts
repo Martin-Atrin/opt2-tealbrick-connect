@@ -259,6 +259,7 @@ test("webhook: a valid Bot Framework token → message with refs, thread, bot me
       senderName: "Ada Lovelace",
       text: "please summarise Grace's notes",
       sentAt: Date.parse("2026-10-12T04:00:00.000Z"),
+      mentions: ["28:0f0f0f0f-1111-2222-3333-444444444444", "29:1graceuser"],
     },
   ]);
   // senderId is directly usable as an openDirect personId

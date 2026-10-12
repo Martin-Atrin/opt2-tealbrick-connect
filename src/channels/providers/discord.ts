@@ -22,6 +22,7 @@ import {
   cleanInboundText,
   type InboundMessage,
   type InboundSink,
+  mentionList,
   type SendInput,
 } from "../provider.ts";
 import { asRecord, backoffMs, cleanName, type ProviderResponse, pause, providerDetail, providerRequest, rateLimited } from "./http.ts";
@@ -257,6 +258,11 @@ export function parseDiscordMessage(data: unknown, botUserIds: readonly string[]
     senderName,
     text,
     sentAt: Number.isFinite(sentAt) ? sentAt : now,
+    // F15: the gateway's resolved user mentions, plus `<@id>` / `<@!id>` tokens in the text.
+    mentions: mentionList([
+      ...(Array.isArray(d.mentions) ? d.mentions : []).map((m) => asRecord(m)?.id).filter((v): v is string => typeof v === "string" && SNOWFLAKE.test(v)),
+      ...[...content.matchAll(/<@!?(\d{5,25})>/gu)].map((m) => m[1] as string),
+    ]),
   };
 }
 

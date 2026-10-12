@@ -1,18 +1,19 @@
 // Conformance harness (CONFORMANCE §2, app target): `tb-conformance app --start conformance.start.ts` boots Connect with
 // the env the suite gives it (fake bridge, enrolment code, TB_KEK, data dir) and drives it like the bridge does.
 //
-// Known-good fixture for the one agent receipt op (`buzz_post`, see conformance.inputs.json): every conformance agent
-// gets a Buzz identity, and the relay is an in-process fake test relay (no network, no real people — C22).
-// Product behaviour is unchanged: in production the owner creates identities in one action from the Buzz page.
+// Known-good fixture for the one agent receipt op (`buzz_post`, see conformance.inputs.json): the agent's Buzz identity is
+// created on its first Buzz op (F20, same as production), and the relay is an in-process fake test relay (no network, no
+// real people — C22).
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { type AppSecrets, defineApp, startApp, TbError } from "@opt2-tealbrick/miniapp-sdk";
+import { defineApp, startApp, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 
 import { createConnectApp } from "./src/app.ts";
-import { BuzzIdentities } from "./src/channels/buzz/identity.ts";
+import { BuzzIdentities, WORKSPACE_SENDER } from "./src/channels/buzz/identity.ts";
 import { verifyEvent } from "./src/channels/buzz/nostr.ts";
+import { SenderStore } from "./src/senders.ts";
 
 const manifest = JSON.parse(readFileSync(join(import.meta.dirname, "tealbrick.manifest.json"), "utf8")) as Manifest;
 const TEST_RELAY = "wss://relay.conformance.example";
@@ -43,30 +44,17 @@ export default async function start(env: Record<string, string>): Promise<{ url:
     allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP],
     buzzRelays: TEST_RELAY,
   });
-  // Ensure the calling agent has an identity before a Buzz op runs (ctx.secrets exists only per call).
-  type AnyHandler = (typeof definition.handlers)[string];
-  const withIdentity = (h: AnyHandler | undefined): AnyHandler => {
-    if (!h) throw new TbError("handler_missing", "handler missing", 500);
-    const run = typeof h === "function" ? h : h.run;
-    const wrapped: typeof run = async (input, ctx) => {
-      const sdkCtx = ctx as typeof ctx & { secrets: AppSecrets };
-      const buzz = new BuzzIdentities({ db: ctx.db, secrets: sdkCtx.secrets, relayUrls: TEST_RELAY, allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP] });
-      await buzz.generateAll([{ id: ctx.caller.id, name: ctx.caller.name }]);
-      return run(input, ctx);
-    };
-    return typeof h === "function" ? wrapped : { ...h, run: wrapped };
-  };
+  // F20: Buzz ops create the calling agent's identity on first use, so the suite drives the real handlers unwrapped.
+  // C86 fixture (owner state, like conformance.inputs.json): the owner has set a workspace Buzz sender, so the suite's
+  // companion-app call (A12.companion_inbound → buzz_post) runs from it. Without one, the refusal is no_sender_identity
+  // (tested in test/senders.test.ts).
   const app = defineApp({
     ...definition,
-    handlers: {
-      ...definition.handlers,
-      buzz_post: withIdentity(definition.handlers.buzz_post),
-      buzz_dm_first: withIdentity(definition.handlers.buzz_dm_first),
-      buzz_dm: withIdentity(definition.handlers.buzz_dm),
-      buzz_react: withIdentity(definition.handlers.buzz_react),
-      buzz_edit: withIdentity(definition.handlers.buzz_edit),
-      buzz_delete: withIdentity(definition.handlers.buzz_delete),
-      buzz_schedule: withIdentity(definition.handlers.buzz_schedule),
+    onStart: async (ctx) => {
+      const buzz = new BuzzIdentities({ db: ctx.db, secrets: ctx.secrets, relayUrls: TEST_RELAY, allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP] });
+      await buzz.ensure({ id: WORKSPACE_SENDER, name: "Conformance workspace" });
+      new SenderStore(ctx.db).set("buzz", null, "Conformance workspace");
+      await definition.onStart?.(ctx);
     },
   });
   // Test roots (C63; suite default since spec 0.1.12): the suite passes TEST Portal Root Keys in TBCONF_PORTAL_ROOT_KEYS;
