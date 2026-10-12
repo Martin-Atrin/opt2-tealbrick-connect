@@ -6,6 +6,7 @@
  *   connect/request 10 s, call 30 s; body cap 2 MiB; at most 200 tools.
  */
 import type { FetchLike } from "../../util/http.ts";
+import { safeFetch } from "../../util/pinned-fetch.ts";
 
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
 export const MCP_REQUEST_TIMEOUT_MS = 10_000;
@@ -98,7 +99,7 @@ export class McpClient {
   private constructor(options: McpClientOptions) {
     this.#url = options.url;
     this.#headers = options.headers ?? {};
-    this.#fetch = options.fetchImpl ?? fetch;
+    this.#fetch = options.fetchImpl ?? safeFetch;
     this.#clientVersion = options.clientVersion ?? "0";
   }
 

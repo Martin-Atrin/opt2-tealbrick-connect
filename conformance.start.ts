@@ -25,7 +25,9 @@ const relayFetch = (async (input: string | URL | Request, init?: RequestInit) =>
   if (url.pathname === "/events" && init?.method === "POST") {
     const event = JSON.parse(String(init.body)) as unknown;
     const ok = verifyEvent(event);
-    return Response.json({ accepted: ok, message: ok ? "" : "invalid: bad event", event_id: ok ? (event as { id: string }).id : null });
+    const dmOpen = ok && (event as { kind: number }).kind === 41010;
+    const message = !ok ? "invalid: bad event" : dmOpen ? `response:${JSON.stringify({ channel_id: "5a7d6c2e-1f3a-4c5b-9d8e-7f6a5b4c3d2e" })}` : "";
+    return Response.json({ accepted: ok, message, event_id: ok ? (event as { id: string }).id : null });
   }
   if (url.pathname === "/query") return Response.json([]);
   return new Response("not found", { status: 404 });
@@ -41,19 +43,26 @@ export default async function start(env: Record<string, string>): Promise<{ url:
     allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP],
     buzzRelayUrl: TEST_RELAY,
   });
-  // Ensure the calling agent has an identity before buzz_post runs (ctx.secrets exists only per call).
-  const post = definition.handlers.buzz_post;
+  // Ensure the calling agent has an identity before a Buzz op runs (ctx.secrets exists only per call).
+  type AnyHandler = (typeof definition.handlers)[string];
+  const withIdentity = (h: AnyHandler | undefined): AnyHandler => {
+    if (!h) throw new TbError("handler_missing", "handler missing", 500);
+    const run = typeof h === "function" ? h : h.run;
+    const wrapped: typeof run = async (input, ctx) => {
+      const sdkCtx = ctx as typeof ctx & { secrets: AppSecrets };
+      const buzz = new BuzzIdentities({ db: ctx.db, secrets: sdkCtx.secrets, relayUrl: TEST_RELAY, allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP], fetchImpl: relayFetch });
+      await buzz.generateAll([{ id: ctx.caller.id, name: ctx.caller.name }]);
+      return run(input, ctx);
+    };
+    return typeof h === "function" ? wrapped : { ...h, run: wrapped };
+  };
   const app = defineApp({
     ...definition,
     handlers: {
       ...definition.handlers,
-      buzz_post: async (input, ctx) => {
-        const sdkCtx = ctx as typeof ctx & { secrets: AppSecrets };
-        const buzz = new BuzzIdentities({ db: ctx.db, secrets: sdkCtx.secrets, relayUrl: TEST_RELAY, allowRelayOrigins: [TEST_RELAY, TEST_RELAY_HTTP], fetchImpl: relayFetch });
-        await buzz.generateAll([{ id: ctx.caller.id, name: ctx.caller.name }]);
-        if (typeof post !== "function") throw new TbError("handler_missing", "buzz_post handler missing", 500);
-        return post(input, ctx);
-      },
+      buzz_post: withIdentity(definition.handlers.buzz_post),
+      buzz_dm_first: withIdentity(definition.handlers.buzz_dm_first),
+      buzz_dm: withIdentity(definition.handlers.buzz_dm),
     },
   });
   const running = await startApp(app, env);

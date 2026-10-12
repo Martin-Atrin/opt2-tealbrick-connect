@@ -135,6 +135,32 @@ export function npubEncode(pubkeyHex: string): string {
   return `npub1${[...words, ...tail].map((w) => CHARSET[w]).join("")}`;
 }
 
+/** NIP-19 `npub1…` or 64 lowercase/uppercase hex → 64 lowercase hex; null otherwise (an `nsec` is never accepted). */
+export function parsePubkey(input: string): string | null {
+  const value = input.trim();
+  if (/^[0-9a-fA-F]{64}$/u.test(value)) return value.toLowerCase();
+  const lower = value.toLowerCase();
+  if (!lower.startsWith("npub1") || lower !== value) return null;
+  const data = [...lower.slice(5)].map((c) => CHARSET.indexOf(c));
+  if (data.length < 7 || data.some((d) => d < 0)) return null;
+  if (polymod([...hrpExpand("npub"), ...data]) !== 1) return null;
+  const words = data.slice(0, -6);
+  const bytes: number[] = [];
+  let acc = 0;
+  let bits = 0;
+  for (const w of words) {
+    acc = (acc << 5) | w;
+    bits += 5;
+    while (bits >= 8) {
+      bits -= 8;
+      bytes.push((acc >>> bits) & 0xff);
+    }
+    acc &= (1 << bits) - 1;
+  }
+  if (bytes.length !== 32 || bits >= 5 || acc !== 0) return null;
+  return Buffer.from(bytes).toString("hex");
+}
+
 /** NIP-98 HTTP auth header value for one request (kind 27235, `u`, `method`, `payload` = sha256 of the body). */
 export function nip98Header(secretHex: string, input: { url: string; method: string; body?: string; now?: number }): string {
   const tags = [

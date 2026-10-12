@@ -1,3 +1,10 @@
 {
-  "buzz_post": { "content": "conformance post", "channel": "0b7d6c2e-1f3a-4c5b-9d8e-7f6a5b4c3d2e" }
+  "buzz_post": {
+    "content": "conformance post",
+    "channel": "0b7d6c2e-1f3a-4c5b-9d8e-7f6a5b4c3d2e"
+  },
+  "buzz_dm_first": {
+    "content": "conformance first contact",
+    "to": "npub1twz3sxx7mww3h5wygcuc64x50eeemgsc6jnwehh7auxpuef224msljefaz"
+  }
 }

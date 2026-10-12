@@ -8,7 +8,7 @@
  */
 import type { JsonSchemaObject } from "@opt2-tealbrick/spec/manifest";
 
-import { classify, type ToolClass } from "../../effect.ts";
+import { classify, namesMoney, type ToolClass } from "../../effect.ts";
 
 export const METHODS = ["get", "head", "options", "post", "put", "patch", "delete"] as const;
 export type Method = (typeof METHODS)[number];
@@ -206,7 +206,9 @@ export function compile(raw: unknown, labels: EntryLabels = {}): { basePath: str
       const readByLabel = method === "post" && (labels.reads ?? []).some((pattern) => patternMatches(pattern, subject));
       const destructive = method === "delete" || (labels.destructive ?? []).some((pattern) => patternMatches(pattern, subject));
       const outward = (labels.outward ?? []).some((pattern) => patternMatches(pattern, subject));
-      const cls = classify({ write: !readMethod && !readByLabel, outward, destructive });
+      // Money movement on a non-read method is always `money` (always held, SEC-02).
+      const money = !readMethod && namesMoney(`${operationId} ${path}`);
+      const cls = classify({ write: !readMethod && !readByLabel, outward, destructive, money });
 
       const group = (location: Parameter["in"]) => {
         const items = parameters.filter((p) => p.in === location);

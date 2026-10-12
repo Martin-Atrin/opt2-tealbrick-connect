@@ -13,6 +13,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import type { FetchLike } from "../../util/http.ts";
 import { assertEndpointAllowed, type Lookup } from "../../util/net-policy.ts";
+import { safeFetch as pinnedSafeFetch } from "../../util/pinned-fetch.ts";
 
 export class OAuthError extends Error {
   readonly code: string;
@@ -56,7 +57,7 @@ const b64url = (b: Buffer) => b.toString("base64url");
 async function safeFetch(net: OAuthNet, url: string, init: RequestInit = {}): Promise<Response> {
   await assertEndpointAllowed(url, { schemes: ["https:"], ...(net.lookup ? { lookup: net.lookup } : {}), ...(net.allowOrigins ? { allowOrigins: net.allowOrigins } : {}) });
   try {
-    return await (net.fetchImpl ?? fetch)(url, { ...init, redirect: "error", signal: AbortSignal.timeout(10_000) });
+    return await (net.fetchImpl ?? pinnedSafeFetch)(url, { ...init, redirect: "error", signal: AbortSignal.timeout(10_000) });
   } catch (error) {
     throw new OAuthError("oauth_unreachable", `OAuth request failed (${error instanceof Error ? error.name : "error"}).`);
   }
@@ -121,6 +122,17 @@ export async function discover(net: OAuthNet, resourceUrl: string): Promise<OAut
   const registrationEndpoint = str(meta.registration_endpoint);
   if (!authorizationEndpoint || !tokenEndpoint) throw new OAuthError("oauth_metadata_invalid", "The authorization server metadata is incomplete.");
   if (!registrationEndpoint) throw new OAuthError("oauth_registration_unsupported", "The server does not allow client registration; connect it with an API key header instead.");
+  // Every OAuth endpoint must be https (an exact allowlisted origin excepted), checked here on the server (SEC-09).
+  for (const endpoint of [authorizationEndpoint, tokenEndpoint, registrationEndpoint]) {
+    let u: URL;
+    try {
+      u = new URL(endpoint);
+    } catch {
+      throw new OAuthError("oauth_metadata_invalid", "An OAuth endpoint is not a valid URL.");
+    }
+    if (u.protocol !== "https:" && !(net.allowOrigins ?? []).includes(u.origin)) throw new OAuthError("oauth_endpoint_insecure", "OAuth endpoints must use https.");
+    if (u.username || u.password) throw new OAuthError("oauth_metadata_invalid", "OAuth endpoints must not carry credentials.");
+  }
   return { resource: resource.toString(), issuer: claimedIssuer, authorizationEndpoint, tokenEndpoint, registrationEndpoint, scope: authParam(challenge, "scope") ?? null };
 }
 

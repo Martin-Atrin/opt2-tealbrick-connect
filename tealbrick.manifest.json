@@ -5,7 +5,7 @@
   "name": "Connect",
   "summary": "Connect your agents to the services you use: Gmail and 1,000+ apps through Composio, self-hosted apps, MCP servers and team chat.",
   "description": "Connect holds all outside connectivity for your agents.\n\n- **Services:** search a service, press Connect, sign in. Several accounts per service (for example two Gmail inboxes).\n- **Access per account and agent:** READ, READ/UPDATE (includes create and send) or READ/UPDATE/DELETE.\n- **As me or as itself:** an agent can use your account, or its own identity (for example its own Buzz identity).\n- **Channels:** Buzz identities for all your agents in one step.\n\nOutward and destructive actions follow your agent policy: held for your approval or recorded as receipts.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "sdkMajor": 1,
   "publisher": {
     "name": "Teal Brick",
@@ -392,6 +392,111 @@
         ],
         "properties": {
           "id": {
+            "type": "string"
+          }
+        }
+      },
+      "crud": [
+        "create"
+      ],
+      "effect": "outward",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "agent"
+    },
+    {
+      "id": "buzz_dm_first",
+      "title": "First direct message to a person",
+      "description": "Send your first Buzz direct message to a person you have not written to before. The owner approves first contact; when the call is held, poll connect__tb_hold_status and repeat the same call after approval.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "to",
+          "content"
+        ],
+        "properties": {
+          "to": {
+            "type": "string",
+            "minLength": 63,
+            "maxLength": 64,
+            "description": "The person's Buzz key: npub1… or 64 hex."
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "required": [
+          "id",
+          "channel",
+          "to"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        }
+      },
+      "crud": [
+        "create"
+      ],
+      "effect": "outward",
+      "holdFamily": "first_contact",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "agent"
+    },
+    {
+      "id": "buzz_dm",
+      "title": "Direct message a known person",
+      "description": "Send a Buzz direct message to a person you already wrote to (after buzz_dm_first ran). For a new person use buzz_dm_first.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "to",
+          "content"
+        ],
+        "properties": {
+          "to": {
+            "type": "string",
+            "minLength": 63,
+            "maxLength": 64,
+            "description": "The person's Buzz key: npub1… or 64 hex."
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "required": [
+          "id",
+          "channel",
+          "to"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "to": {
             "type": "string"
           }
         }

@@ -34,7 +34,7 @@ const origins = [new URL(relayUrl).origin, new URL(httpBase).origin];
 
 function memoryDb(): Db {
   const db = new DatabaseSync(":memory:");
-  for (const f of ["0001_init.sql", "0002_drop_unused_tables.sql"]) db.exec(readFileSync(join(import.meta.dirname, "..", "migrations", f), "utf8"));
+  for (const f of ["0001_init.sql", "0002_drop_unused_tables.sql", "0003_buzz_contacts.sql"]) db.exec(readFileSync(join(import.meta.dirname, "..", "migrations", f), "utf8"));
   return {
     exec: (sql) => db.exec(sql),
     prepare: (sql) => {
@@ -127,8 +127,17 @@ try {
     if (!after.some((m) => m.threadId === postId)) throw new Error("reply not threaded");
     return `${after.length} messages`;
   });
+  await step("agent 1 direct-messages agent 2 (kind 41010 + 9); agent 2 reads it; reopen reuses the conversation", async () => {
+    const to = identities.get(agents[1]?.id ?? "")?.npub ?? "";
+    const first = await relay.directMessage(agents[0]?.id ?? "", { to, content: "Direct hello from agent 1 (opt2 smoke)" });
+    const seen = await relay.read(agents[1]?.id ?? "", { channel: first.channel });
+    if (!seen.some((m) => m.id === first.id)) throw new Error("DM not visible to the recipient");
+    const again = await relay.directMessage(agents[0]?.id ?? "", { to, content: "second DM" });
+    if (again.channel !== first.channel) throw new Error("second DM opened a new conversation");
+    return `channel ${first.channel.slice(0, 8)}…`;
+  });
 } catch {
   // reported below
 }
 for (const s of steps) console.log(`${s.ok ? "PASS" : "FAIL"}  ${s.step}: ${s.detail}`);
-process.exit(steps.every((s) => s.ok) && steps.length === 7 ? 0 : 1);
+process.exit(steps.every((s) => s.ok) && steps.length === 8 ? 0 : 1);

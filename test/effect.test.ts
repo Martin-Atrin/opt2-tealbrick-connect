@@ -49,3 +49,35 @@ test("Gmail policy: send outward, delete destructive, label removal is a write, 
   assert.equal(classifyComposioTool("GMAIL_FETCH_EMAILS", gmail).effect, "read");
   assert.equal(classifyComposioTool("GMAIL_LIST_THREADS", gmail).effect, "read");
 });
+
+test("SEC-02: unknown verbs fail closed; money is always money; read only for read verbs", () => {
+  const cases: [string, string][] = [
+    ["GITHUB_MERGE_PULL_REQUEST", "outward"],
+    ["JIRA_CLOSE_ISSUE", "outward"],
+    ["SLACK_APPROVE_WORKFLOW_REQUEST", "outward"],
+    ["LINEAR_ARCHIVE_PROJECT", "write"],
+    ["ACME_FROBNICATE_WIDGET", "outward"],
+    ["NOTION_RENAME_PAGE", "write"],
+    ["STRIPE_CREATE_REFUND", "money"],
+    ["PAYPAL_SEND_PAYMENT", "money"],
+    ["BANK_TRANSFER_FUNDS", "money"],
+    ["SHOP_CHECKOUT_CART", "money"],
+    ["GITHUB_LIST_REPOSITORIES", "read"],
+    ["NOTION_GET_PAGE", "read"],
+    ["GITHUB_GET_AND_MERGE", "outward"],
+  ];
+  for (const [name, effect] of cases) assert.equal(inferFromName(name).effect, effect, name);
+  const money = inferFromName("STRIPE_CREATE_REFUND");
+  assert.equal(money.holdFamily, "money");
+  assert.deepEqual(levelFor(money.crud), "read_update_delete");
+  // READ tier never covers a fail-closed unknown tool.
+  assert.equal(levelAllows("read", inferFromName("ACME_FROBNICATE_WIDGET").crud), false);
+});
+
+test("SEC-02: Composio without a policy fails closed; a policy never downgrades money; MCP money ignores readOnlyHint", () => {
+  assert.equal(classifyComposioTool("TRELLO_CLOSE_BOARD", undefined).effect, "outward");
+  assert.equal(classifyComposioTool("GMAIL_PAY_INVOICE", loadPolicies().get("gmail")).effect, "money");
+  assert.equal(classifyMcpTool("charge_card", { readOnlyHint: true }).effect, "money");
+  assert.equal(classifyMcpTool("frobnicate", undefined).effect, "outward");
+  assert.equal(classifyMcpTool("frobnicate", { readOnlyHint: true }).effect, "read");
+});

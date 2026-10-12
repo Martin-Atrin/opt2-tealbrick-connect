@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { classify, inferFromName, type ToolClass } from "../../effect.ts";
+import { classify, inferFromName, namesMoney, type ToolClass } from "../../effect.ts";
 
 export interface ComposioPolicy {
   schema: 1;
@@ -66,10 +66,12 @@ export function loadPolicies(dir = join(import.meta.dirname, "../../../policies/
 }
 
 export function classifyComposioTool(slug: string, policy: ComposioPolicy | undefined): ToolClass {
+  // Money movement is always `money` (always held), whatever a policy says about the tool.
+  if (namesMoney(slug)) return classify({ write: true, outward: true, destructive: false, money: true });
   if (!policy) return inferFromName(slug);
   if (matches(policy.destructive, slug)) return classify({ write: true, outward: false, destructive: true });
   if (matches(policy.outward, slug)) return classify({ write: true, outward: true, destructive: false });
   if (matches(policy.writes, slug)) return classify({ write: true, outward: false, destructive: false });
   if (matches(policy.reads, slug)) return classify({ write: false, outward: false, destructive: false });
-  return inferFromName(slug);
+  return inferFromName(slug); // fail closed for slugs the policy does not name (SEC-02)
 }

@@ -8,9 +8,10 @@
  */
 import { type FetchLike, requestJson, UpstreamError } from "../../util/http.ts";
 import type { BuzzIdentities } from "./identity.ts";
-import { type NostrEvent, npubEncode, verifyEvent } from "./nostr.ts";
+import { type NostrEvent, npubEncode, parsePubkey, verifyEvent } from "./nostr.ts";
 
 export const KIND_CHAT = 9;
+export const KIND_DM_OPEN = 41010;
 export const KIND_GROUP_METADATA = 39000;
 export const KIND_GROUP_MEMBERS = 39002;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -155,5 +156,33 @@ export class BuzzRelay {
       throw new BuzzRefusal("buzz_rejected", `The Buzz relay rejected the message: ${reason}`, 409);
     }
     return { id: event.id };
+  }
+
+  /**
+   * Open (or reuse) the direct-message channel with one person (Buzz kind 41010 with a `p` tag; the relay answers
+   * `response:{"channel_id": …}` and returns the existing channel when there is one), then post kind 9 into it.
+   */
+  async directMessage(agent: string, input: { to: string; content: string }): Promise<{ id: string; channel: string; to: string }> {
+    const identity = this.#identities.get(agent);
+    if (!identity) throw new Error("buzz_identity_missing");
+    const to = parsePubkey(input.to);
+    if (!to) throw new BuzzRefusal("buzz_recipient_invalid", "Give the person's Buzz key as npub1… or 64 hex.", 400);
+    if (to === identity.pubkey) throw new BuzzRefusal("buzz_recipient_invalid", "You cannot send a direct message to yourself.", 400);
+    const open = await this.#identities.sign(agent, { kind: KIND_DM_OPEN, tags: [["p", to]], content: "" });
+    const answer = await this.#post<{ accepted?: boolean; message?: string }>(agent, "/events", open);
+    if (answer?.accepted === false) throw new BuzzRefusal("buzz_rejected", `The Buzz relay refused to open the conversation: ${cleanText(String(answer.message ?? ""), 200)}`, 409);
+    let channel: string | undefined;
+    const message = String(answer?.message ?? "");
+    if (message.startsWith("response:")) {
+      try {
+        const id = (JSON.parse(message.slice("response:".length)) as { channel_id?: unknown }).channel_id;
+        channel = typeof id === "string" && isChannelId(id) ? id : undefined;
+      } catch {
+        channel = undefined;
+      }
+    }
+    if (!channel) throw new BuzzRefusal("buzz_bad_response", "The Buzz relay did not return the conversation id.", 502);
+    const posted = await this.post(agent, { channel, content: input.content });
+    return { id: posted.id, channel, to: npubEncode(to) };
   }
 }

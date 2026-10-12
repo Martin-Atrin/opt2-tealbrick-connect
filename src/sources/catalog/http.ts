@@ -10,6 +10,7 @@
 
 import type { FetchLike } from "../../util/http.ts";
 import { assertEndpointAllowed, type Lookup } from "../../util/net-policy.ts";
+import { safeFetch } from "../../util/pinned-fetch.ts";
 import { scrubSecrets } from "../../util/redact.ts";
 import type { CompiledOperation } from "./openapi.ts";
 
@@ -123,7 +124,7 @@ export async function callOperation(input: Parameters<typeof buildRequest>[0] & 
   const { url, init, secrets } = buildRequest(input);
   let response: Response;
   try {
-    response = await (input.fetchImpl ?? fetch)(url, { ...init, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
+    response = await (input.fetchImpl ?? safeFetch)(url, { ...init, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
   } catch (error) {
     throw new CatalogCallError("upstream_unreachable", scrubSecrets(error instanceof Error ? error.message : String(error), secrets));
   }

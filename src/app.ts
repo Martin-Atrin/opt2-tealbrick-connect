@@ -10,6 +10,7 @@ import type { Db, DynamicHandlers, Handler, HandlerSpec, Json, OpContext, Public
 
 import { type Account, AccountStore, CONNECTION_KINDS, type ConnectionKind } from "./accounts.ts";
 import { BuzzIdentities } from "./channels/buzz/identity.ts";
+import { parsePubkey } from "./channels/buzz/nostr.ts";
 import { BuzzRefusal, BuzzRelay } from "./channels/buzz/relay.ts";
 import { CatalogCallError } from "./sources/catalog/http.ts";
 import { CatalogError, CatalogSource } from "./sources/catalog/source.ts";
@@ -22,6 +23,7 @@ import { McpSource } from "./sources/mcp/source.ts";
 import { ACCOUNT_ARGUMENT, ToolRegistry } from "./tools.ts";
 import { type FetchLike, UpstreamError } from "./util/http.ts";
 import { NetPolicyError } from "./util/net-policy.ts";
+import { pinnedFetch } from "./util/pinned-fetch.ts";
 
 export const PRODUCT_SCOPE = "account";
 export const COMPOSIO_KEY = "COMPOSIO_API_KEY";
@@ -85,6 +87,9 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
   const policies = loadPolicies();
   const toolkitCache = new ToolkitCache();
   let cache: { db: Db; services: Services } | null = null;
+  /** One outbound fetch: injected (tests) or pinned-connect (SEC-09), with exact allowlisted test hosts. */
+  const allowHosts = [...(env.allowRelayOrigins ?? []), ...(env.catalogAllowOrigins ?? []), ...(env.composioAllowedOrigins ?? [])].map((o) => new URL(o).hostname);
+  const outbound: FetchLike = env.fetchImpl ?? pinnedFetch(allowHosts);
 
   /** Composio client from the current key: app-own key wins over the workspace default (SDK getKey, C12). */
   const composioClient = async (getKey: (name: string) => Promise<string | null>): Promise<ComposioClient> => {
@@ -94,7 +99,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       apiKey,
       ...(env.composioBaseUrl ? { baseUrl: env.composioBaseUrl } : {}),
       ...(env.composioAllowedOrigins ? { allowedOrigins: env.composioAllowedOrigins } : {}),
-      ...(env.fetchImpl ? { fetchImpl: env.fetchImpl } : {}),
+      fetchImpl: outbound,
     });
   };
 
@@ -116,17 +121,17 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       db,
       secrets,
       relayUrl: env.buzzRelayUrl ?? null,
-      ...(env.fetchImpl ? { fetchImpl: env.fetchImpl } : {}),
+      fetchImpl: outbound,
       ...(env.allowRelayOrigins ? { allowRelayOrigins: env.allowRelayOrigins } : {}),
     });
-    const relay = new BuzzRelay(buzz, env.fetchImpl);
+    const relay = new BuzzRelay(buzz, outbound);
     const catalog = new CatalogSource({
       artifact: env.manifest.artifacts?.find((a) => a.id === "catalog"),
       dataDir: env.dataDir ?? "/data",
       accounts,
       tools,
       secrets,
-      ...(env.fetchImpl ? { fetchImpl: env.fetchImpl } : {}),
+      fetchImpl: outbound,
       ...(env.catalogAllowOrigins ? { allowOrigins: env.catalogAllowOrigins } : {}),
     });
     const mcp = new McpSource({
@@ -134,7 +139,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       accounts,
       tools,
       secrets,
-      ...(env.fetchImpl ? { fetchImpl: env.fetchImpl } : {}),
+      fetchImpl: outbound,
       ...(env.catalogAllowOrigins ? { allowOrigins: env.catalogAllowOrigins } : {}),
     });
     const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp };
@@ -288,6 +293,40 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           ...(replyTo ? { replyTo: { id: replyTo, ...(root ? { root } : {}) } } : {}),
         });
       });
+    },
+
+    buzz_dm_first: {
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const sent = await s.relay.directMessage(ctx.caller.id, { to: String(i.to ?? ""), content: String(i.content ?? "") });
+          rememberContact(ctx.db, ctx.caller.id, sent);
+          ctx.receipt.summary(`First Buzz DM to ${shortKey(sent.to)}`);
+          ctx.receipt.meta({ subjectKind: "as_itself", to: sent.to, channel: sent.channel });
+          return sent;
+        }),
+      holdView: (input) => {
+        const i = asInput(input);
+        return `First direct message in Buzz\nTo: ${String(i.to ?? "")}\n\n${String(i.content ?? "")}`;
+      },
+      redact: (input) => `First Buzz DM to ${shortKey(String(asInput(input).to ?? ""))}`,
+    },
+    buzz_dm: {
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const to = parsePubkey(String(i.to ?? ""));
+          if (!to) fail("buzz_recipient_invalid", "Give the person's Buzz key as npub1… or 64 hex.");
+          const known = ctx.db.prepare("SELECT 1 FROM connect_buzz_contacts WHERE agent = ? AND pubkey = ?").get(ctx.caller.id, to);
+          if (!known) fail("buzz_first_contact_required", "You have not written to this person before. Use buzz_dm_first; the owner approves first contact.", 409);
+          const sent = await s.relay.directMessage(ctx.caller.id, { to: to as string, content: String(i.content ?? "") });
+          ctx.receipt.summary(`Buzz DM to ${shortKey(sent.to)}`);
+          ctx.receipt.meta({ subjectKind: "as_itself", to: sent.to, channel: sent.channel });
+          return sent;
+        }),
+      redact: (input) => `Buzz DM to ${shortKey(String(asInput(input).to ?? ""))}`,
     },
 
     // ── person ops (app UI through the bridge launch) ──
@@ -526,6 +565,19 @@ function callbackPage(ok: boolean, title: string, detail: string, status: number
     `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;padding:2rem"><h1>${title}</h1><p>${detail}</p><p>You can close this window.</p><script>window.opener&&window.opener.postMessage({connect:${ok ? "true" : "false"}},"*")</script></body>`,
     { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } },
   );
+}
+
+/** Record that the agent's first DM to this person ran (later DMs use buzz_dm). */
+function rememberContact(db: Db, agent: string, sent: { to: string; channel: string }): void {
+  const pubkey = parsePubkey(sent.to);
+  if (!pubkey) return;
+  db.prepare(
+    "INSERT INTO connect_buzz_contacts (agent, pubkey, channel, first_sent_at) VALUES (?, ?, ?, ?) ON CONFLICT (agent, pubkey) DO UPDATE SET channel = excluded.channel",
+  ).run(agent, pubkey, sent.channel, Date.now());
+}
+
+function shortKey(key: string): string {
+  return key.length > 16 ? `${key.slice(0, 12)}…${key.slice(-4)}` : key;
 }
 
 function escapeHtml(value: string): string {

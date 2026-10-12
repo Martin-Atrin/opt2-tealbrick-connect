@@ -64,7 +64,7 @@ function retryAfterMs(response: Response): number | null {
 export async function requestJson<T = unknown>(req: JsonRequest): Promise<T> {
   const method = req.method ?? "GET";
   const retries = req.retries ?? (method === "GET" ? 2 : 0);
-  const fetchImpl = req.fetchImpl ?? fetch;
+  const fetchImpl = req.fetchImpl ?? (await import("./pinned-fetch.ts")).safeFetch;
   const sleep = req.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   let attempt = 0;
   for (;;) {
