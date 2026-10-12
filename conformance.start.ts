@@ -69,7 +69,10 @@ export default async function start(env: Record<string, string>): Promise<{ url:
       buzz_schedule: withIdentity(definition.handlers.buzz_schedule),
     },
   });
-  const running = await startApp(app, env);
+  // Test roots (C63; suite default since spec 0.1.12): the suite passes TEST Portal Root Keys in TBCONF_PORTAL_ROOT_KEYS;
+  // only this harness reads it and hands them to startApp. Production never reads that variable.
+  const harness = env.TBCONF_PORTAL_ROOT_KEYS ? ({ portalRootKeys: JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) } as Parameters<typeof startApp>[2]) : undefined;
+  const running = await startApp(app, env, harness);
   return {
     url: `http://127.0.0.1:${manifest.runtime.port}`,
     stop: () => running.stop(),
