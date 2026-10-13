@@ -80,9 +80,9 @@ test("relay URL: wss host only; private relays refused", async () => {
   assert.throws(() => normalizeRelayUrl("https://relay.example.com"), /relay_url_invalid/u);
   assert.throws(() => normalizeRelayUrl("wss://relay.example.com/path"), /relay_url_invalid/u);
   const db = testDb();
-  const buzz = new BuzzIdentities({ db, secrets: memorySecrets(), relayUrl: "wss://relay.corp.example", lookup: async () => [{ address: "10.0.0.2", family: 4 }] });
+  const buzz = new BuzzIdentities({ db, secrets: memorySecrets(), relayUrls: "wss://relay.corp.example", lookup: async () => [{ address: "10.0.0.2", family: 4 }] });
   await assert.rejects(buzz.relayHttpBase(), /address_not_allowed|not allowed/u);
-  const ws = new BuzzIdentities({ db, secrets: memorySecrets(), relayUrl: "ws://relay.example.com" });
+  const ws = new BuzzIdentities({ db, secrets: memorySecrets(), relayUrls: "ws://relay.example.com" });
   assert.equal(ws.relayUrl(), null);
   assert.match(ws.relayList().problems[0] ?? "", /wss:\/\//u);
   assert.equal(new BuzzIdentities({ db, secrets: memorySecrets() }).relayUrl(), null);
@@ -106,7 +106,7 @@ test("profile publish posts a signed kind 0 with a valid NIP-98 header to the te
   const buzz = new BuzzIdentities({
     db,
     secrets: memorySecrets(),
-    relayUrl: "wss://relay.test.example",
+    relayUrls: "wss://relay.test.example",
     allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"],
   });
   await buzz.generateAll([{ id: "agt_A", name: "Agent A" }]);

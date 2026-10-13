@@ -28,7 +28,7 @@ async function setup() {
     },
   });
   const db = testDb();
-  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), fetchImpl: relay.impl, buzzRelayUrl: RELAY, allowRelayOrigins: ORIGINS });
+  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), fetchImpl: relay.impl, buzzRelays: RELAY, allowRelayOrigins: ORIGINS });
   await app.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "A", mode: "free", status: "active" }, eventCtx(db));
   await handlerOf(app, "buzz_identities_generate")({}, testCtx({ db, person: true }));
   return { db, app, events, relay, ctx: testCtx({ db, agent: AGENT }) };
@@ -62,7 +62,7 @@ test("schedule: validated time, listed, cancelled, due posts sent once by the sc
   const b = (await handlerOf(s.app, "buzz_schedule")({ channel: CHANNEL, content: "later B", sendAt: new Date(Date.now() + 120_000).toISOString() }, s.ctx)) as { id: string };
   await handlerOf(s.app, "buzz_schedule_cancel")({ id: b.id }, s.ctx);
   await assert.rejects(handlerOf(s.app, "buzz_schedule_cancel")({ id: b.id }, s.ctx), (e: ConnectError) => e.code === "buzz_scheduled_unknown");
-  const relay = new BuzzRelay(new BuzzIdentities({ db: s.db, secrets: secretsFor(s.db), relayUrl: RELAY, allowRelayOrigins: ORIGINS }), s.relay.impl);
+  const relay = new BuzzRelay(new BuzzIdentities({ db: s.db, secrets: secretsFor(s.db), relayUrls: RELAY, allowRelayOrigins: ORIGINS }), s.relay.impl);
   const before = s.events.length;
   assert.equal(await runDueBuzzPosts(s.db, relay, s.ctx.log, Date.now() + 61_000), 1);
   assert.equal(await runDueBuzzPosts(s.db, relay, s.ctx.log, Date.now() + 200_000), 0);

@@ -48,7 +48,7 @@ test("first DM opens the conversation (kind 41010) and posts (kind 9); later DMs
     manifest,
     migrationsDir: join(root, "migrations"),
     fetchImpl: relay.impl,
-    buzzRelayUrl: "wss://relay.test.example",
+    buzzRelays: "wss://relay.test.example",
     allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"],
   });
   await app.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "Agent", mode: "free", status: "active" }, eventCtx(db));

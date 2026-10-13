@@ -41,7 +41,7 @@ async function setup() {
     },
   });
   const identities = new BuzzIdentities({
-    relayUrl: "wss://relay.test.example",
+    relayUrls: "wss://relay.test.example",
     db,
     secrets: memorySecrets(),
     allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"],
@@ -106,7 +106,7 @@ test("posting to a channel the agent is not a member of is a clear refusal (QA S
   const relay = fakeFetch({
     "POST /events": () => ({ status: 400, body: { error: "restricted: not a channel member" } }),
   });
-  const identities = new BuzzIdentities({ db, secrets: memorySecrets(), relayUrl: "wss://relay.test.example", allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"] });
+  const identities = new BuzzIdentities({ db, secrets: memorySecrets(), relayUrls: "wss://relay.test.example", allowRelayOrigins: ["wss://relay.test.example", "https://relay.test.example"] });
   await identities.generateAll([{ id: "agt_A", name: "A" }]);
   const r = new BuzzRelay(identities, relay.impl);
   await assert.rejects(r.post("agt_A", { channel: CHANNEL, content: "hi" }), (e: BuzzRefusal) => e.code === "buzz_not_member" && e.httpStatus === 403);

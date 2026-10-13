@@ -12,7 +12,7 @@ import { type ConnectError, createConnectApp, runDueBuzzPosts } from "../src/app
 import { BuzzIdentities } from "../src/channels/buzz/identity.ts";
 import { eventId, generateSecretKey, type NostrEvent, npubEncode, publicKeyOf, signEvent, verifyEvent } from "../src/channels/buzz/nostr.ts";
 import { BuzzRelay } from "../src/channels/buzz/relay.ts";
-import { MAX_RELAYS, normalizeRelayUrl, type RelayOutcome, workspaceRelayList } from "../src/channels/buzz/relays.ts";
+import { MAX_RELAYS, normalizeRelayUrl, OLD_RELAY_SETTING_PROBLEM, type RelayOutcome, workspaceRelayList } from "../src/channels/buzz/relays.ts";
 import { eventCtx, handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
@@ -51,7 +51,7 @@ function relays(modes: Record<string, Mode> = {}) {
   return { impl, events, stored, dmChannel, modes };
 }
 
-async function app(input: { relays?: string; legacy?: string; modes?: Record<string, Mode> }) {
+async function app(input: { relays?: string; oldSetting?: boolean; modes?: Record<string, Mode> }) {
   const net = relays(input.modes);
   const db = testDb();
   const connect = createConnectApp({
@@ -60,7 +60,7 @@ async function app(input: { relays?: string; legacy?: string; modes?: Record<str
     fetchImpl: net.impl,
     allowRelayOrigins: ORIGINS,
     ...(input.relays !== undefined ? { buzzRelays: input.relays } : {}),
-    ...(input.legacy !== undefined ? { buzzRelayUrl: input.legacy } : {}),
+    ...(input.oldSetting !== undefined ? { oldBuzzRelaySettingPresent: input.oldSetting } : {}),
   });
   await connect.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "Multi", mode: "free", status: "active" }, eventCtx(db));
   await handlerOf(connect, "buzz_identities_generate")({}, testCtx({ db, person: true }));
@@ -69,17 +69,21 @@ async function app(input: { relays?: string; legacy?: string; modes?: Record<str
   return { db, connect, net, call, owner };
 }
 
-test("relay list: normalised, deduplicated, ordered, max 8; old buzz_relay_url becomes entry 1", () => {
-  const list = workspaceRelayList({ legacy: "wss://old.example.com/", list: `wss://a.example.com\nwss://OLD.example.com, wss://b.example.com:444 ; wss://a.example.com/` });
-  assert.deepEqual(list.relays, ["wss://old.example.com", "wss://a.example.com", "wss://b.example.com:444"]);
+test("relay list: normalised, deduplicated, ordered, max 8; only the list is read (C133)", () => {
+  const list = workspaceRelayList({ list: `wss://a.example.com\nwss://OLD.example.com, wss://b.example.com:444 ; wss://a.example.com/` });
+  assert.deepEqual(list.relays, ["wss://a.example.com", "wss://old.example.com", "wss://b.example.com:444"]);
   assert.deepEqual(list.problems, []);
   const many = workspaceRelayList({ list: Array.from({ length: 10 }, (_, i) => `wss://r${i}.example.com`).join(" ") });
   assert.equal(many.relays.length, MAX_RELAYS);
   assert.equal(many.problems.length, 2);
   assert.match(many.problems[0] ?? "", /at most 8/u);
-  // Only the old setting set (qa1 today): it is the one relay, nothing breaks.
-  assert.deepEqual(workspaceRelayList({ legacy: "wss://buzz-test-relay-production.up.railway.app" }).relays, ["wss://buzz-test-relay-production.up.railway.app"]);
+  // C133: the removed old setting is never a relay; its presence is a clear owner-facing problem.
+  const old = workspaceRelayList({ oldSettingPresent: true });
+  assert.deepEqual(old.relays, []);
+  assert.deepEqual(old.problems, [OLD_RELAY_SETTING_PROBLEM]);
+  assert.deepEqual(workspaceRelayList({ list: "wss://a.example.com", oldSettingPresent: true }).relays, ["wss://a.example.com"]);
   assert.deepEqual(workspaceRelayList({}).relays, []);
+  assert.deepEqual(workspaceRelayList({}).problems, []);
 });
 
 test("relay URL safety: wss only; loopback, private, link-local and local names refused unless allowlisted", () => {
@@ -96,15 +100,20 @@ test("relay URL safety: wss only; loopback, private, link-local and local names 
   assert.match(list.problems[0] ?? "", /private, loopback/u);
 });
 
-test("migration at app level: only the old setting → the agent uses that relay; list adds more relays after it", async () => {
-  const old = await app({ legacy: A });
-  const mine = (await old.call("buzz_identity", {})) as { relay: string; relays: string[] };
-  assert.equal(mine.relay, A);
-  assert.deepEqual(mine.relays, [A]);
-  const both = await app({ legacy: A, relays: `${B}\n${A}` });
-  const listed = (await both.owner("buzz_identities_list", {})) as { relay: string; relays: string[]; agents: { relays: string[] | null }[] };
-  assert.equal(listed.relay, A);
-  assert.deepEqual(listed.relays, [A, B]);
+test("C133 at app level: only the old setting → clear refusal + owner problem; with the list it runs and still warns", async () => {
+  const old = await app({ oldSetting: true });
+  await assert.rejects(old.call("buzz_read", { channel: CHANNEL }), (e: { code?: string; message?: string }) => e.code === "buzz_relay_setting_removed" && /buzz_relay_url/u.test(e.message ?? ""));
+  const oldList = (await old.owner("buzz_identities_list", {})) as { relay: string | null; relays: string[]; relayProblems: string[] };
+  assert.equal(oldList.relay, null);
+  assert.deepEqual(oldList.relays, []);
+  assert.deepEqual(oldList.relayProblems, [OLD_RELAY_SETTING_PROBLEM]);
+  const none = await app({});
+  await assert.rejects(none.call("buzz_read", { channel: CHANNEL }), (e: { code?: string }) => e.code === "buzz_relay_missing");
+  const both = await app({ oldSetting: true, relays: `${B}\n${A}` });
+  const listed = (await both.owner("buzz_identities_list", {})) as { relay: string; relays: string[]; relayProblems: string[]; agents: { relays: string[] | null }[] };
+  assert.equal(listed.relay, B);
+  assert.deepEqual(listed.relays, [B, A]);
+  assert.deepEqual(listed.relayProblems, [OLD_RELAY_SETTING_PROBLEM]);
   assert.equal(listed.agents[0]?.relays, null);
 });
 
@@ -234,13 +243,13 @@ test("profiles publish to every relay of each agent; scheduled posts keep the ag
   assert.deepEqual(s.net.events[B]?.filter((e) => e.kind === 9).map((e) => e.content).sort(), ["later on B", "later on all"].sort());
 });
 
-test("manifest: relay list setting + env, old setting kept for one release, relays argument on agent Buzz ops", () => {
+test("manifest: relay list setting + env, old single-relay setting removed (C133), relays argument on agent Buzz ops", () => {
   const fields = manifest.settings?.steps.flatMap((s) => s.fields) ?? [];
   assert.equal(fields.find((f) => f.key === "buzz_relays")?.type, "text");
-  assert.ok(fields.find((f) => f.key === "buzz_relay_url"));
+  assert.equal(fields.find((f) => f.key === "buzz_relay_url"), undefined);
   const env = manifest.runtime.env ?? [];
   assert.ok(env.some((e) => e.name === "CONNECT_BUZZ_RELAYS" && e.setting === "buzz_relays"));
-  assert.ok(env.some((e) => e.name === "CONNECT_BUZZ_RELAY_URL" && e.setting === "buzz_relay_url"));
+  assert.ok(!env.some((e) => e.name === "CONNECT_BUZZ_RELAY_URL" || e.setting === "buzz_relay_url"));
   for (const id of ["buzz_channels", "buzz_read", "buzz_post", "buzz_dm_first", "buzz_dm", "buzz_react", "buzz_edit", "buzz_delete", "buzz_schedule"]) {
     const op = manifest.operations.find((o) => o.id === id);
     assert.ok((op?.input as { properties?: Record<string, unknown> } | undefined)?.properties?.relays, `${id} has relays`);

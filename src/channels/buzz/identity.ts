@@ -14,7 +14,7 @@ import type { AppSecrets } from "@opt2-tealbrick/miniapp-sdk";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
 import { assertEndpointAllowed, type Lookup } from "../../util/net-policy.ts";
 import { generateSecretKey, nip98Header, npubEncode, publicKeyOf, signEvent } from "./nostr.ts";
-import { BuzzRefusal, MAX_RELAYS, normalizeRelayUrl, type RelayList, workspaceRelayList } from "./relays.ts";
+import { BuzzRefusal, MAX_RELAYS, normalizeRelayUrl, OLD_RELAY_SETTING_PROBLEM, type RelayList, workspaceRelayList } from "./relays.ts";
 
 export { normalizeRelayUrl } from "./relays.ts";
 
@@ -44,8 +44,8 @@ export interface BuzzDeps {
   db: Db;
   /** Manifest setting `buzz_relays` (env CONNECT_BUZZ_RELAYS): the ordered relay list (C73). */
   relayUrls?: string | null;
-  /** Old manifest setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL): read for one release as the first list entry. */
-  relayUrl?: string | null;
+  /** C133: the removed setting `buzz_relay_url` is still set (its value is never read); reported as a problem. */
+  oldRelaySettingPresent?: boolean;
   secrets: AppSecrets;
   lookup?: Lookup;
   /** Exact relay origins allowed without the public-address check (test relay). */
@@ -165,9 +165,20 @@ export class BuzzIdentities {
     this.#d.db.prepare("DELETE FROM connect_buzz_identities WHERE agent = ?").run(agent);
   }
 
-  /** Workspace relays (C73): old `buzz_relay_url` first, then `buzz_relays`; normalised, deduplicated, at most 8. */
+  /** Workspace relays (C73): the `buzz_relays` list; normalised, deduplicated, at most 8 (C133: no old single setting). */
   relayList(): RelayList {
-    return workspaceRelayList({ list: this.#d.relayUrls ?? null, legacy: this.#d.relayUrl ?? null, ...(this.#d.allowRelayOrigins ? { allowOrigins: this.#d.allowRelayOrigins } : {}) });
+    return workspaceRelayList({
+      list: this.#d.relayUrls ?? null,
+      oldSettingPresent: this.#d.oldRelaySettingPresent === true,
+      ...(this.#d.allowRelayOrigins ? { allowOrigins: this.#d.allowRelayOrigins } : {}),
+    });
+  }
+
+  /** The refusal when no relay is set; names the removed old setting when that is the reason (C133). */
+  #noRelay(): BuzzRefusal {
+    return this.#d.oldRelaySettingPresent === true
+      ? new BuzzRefusal("buzz_relay_setting_removed", OLD_RELAY_SETTING_PROBLEM, 409)
+      : new BuzzRefusal("buzz_relay_missing", "No Buzz relay is set. The owner sets Buzz relays in Connect's settings in Portal.", 409);
   }
 
   workspaceRelays(): string[] {
@@ -223,7 +234,7 @@ export class BuzzIdentities {
    */
   relaysFor(agent: string, requested?: readonly string[]): string[] {
     const workspace = this.workspaceRelays();
-    if (workspace.length === 0) throw new BuzzRefusal("buzz_relay_missing", "No Buzz relay is set. The owner sets Buzz relays in Connect's settings in Portal.", 409);
+    if (workspace.length === 0) throw this.#noRelay();
     const selection = this.agentRelaySelection(agent);
     const allowed = selection === null ? workspace : workspace.filter((r) => selection.includes(r));
     if (allowed.length === 0) throw new BuzzRefusal("buzz_relays_none_selected", "None of the relays the owner chose for you is in the workspace relay list. Ask the owner to update your Buzz relays in Connect.", 409);
@@ -263,7 +274,7 @@ export class BuzzIdentities {
 
   /** Relay HTTP base (`https://<relay host>`), checked against the outbound policy on every use. */
   async relayHttpBase(relay: string | null = this.relayUrl()): Promise<string> {
-    if (!relay) throw new BuzzRefusal("buzz_relay_missing", "No Buzz relay is set. The owner sets Buzz relays in Connect's settings in Portal.", 409);
+    if (!relay) throw this.#noRelay();
     const base = relay.replace(/^wss:/u, "https:").replace(/^ws:/u, "http:");
     await assertEndpointAllowed(base, { schemes: ["https:"], ...this.#policy() });
     return base;

@@ -70,8 +70,8 @@ export interface ConnectEnv {
   channelNet?: ChannelNet;
   /** Manifest setting `buzz_relays` (env CONNECT_BUZZ_RELAYS): ordered relay list (C73; settings reach apps only as env, S6). */
   buzzRelays?: string | null;
-  /** Old manifest setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL): read for one release as the first relay (C73 migration). */
-  buzzRelayUrl?: string | null;
+  /** C133: the removed setting `buzz_relay_url` is still in the env (value never read); Buzz reports it clearly. */
+  oldBuzzRelaySettingPresent?: boolean;
 }
 
 /** The SDK passes `SdkOpContext` (publicUrl, workspace, scopes, secrets: C31) where the frozen types say OpContext. */
@@ -144,7 +144,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       db,
       secrets,
       relayUrls: env.buzzRelays ?? null,
-      relayUrl: env.buzzRelayUrl ?? null,
+      oldRelaySettingPresent: env.oldBuzzRelaySettingPresent === true,
       ...(env.allowRelayOrigins ? { allowRelayOrigins: env.allowRelayOrigins } : {}),
     });
     const relay = new BuzzRelay(buzz, outbound);

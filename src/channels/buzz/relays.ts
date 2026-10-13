@@ -4,8 +4,9 @@
  *
  * - Setting `buzz_relays` (env CONNECT_BUZZ_RELAYS, owner input in Portal): wss addresses separated by new lines, commas
  *   or spaces. Normalised (`wss://host[:port]`), deduplicated, at most MAX_RELAYS.
- * - Migration: the old single setting `buzz_relay_url` (env CONNECT_BUZZ_RELAY_URL) is read for one more release and
- *   becomes the FIRST list entry. No Portal write is needed: existing installs keep their relay.
+ * - C133: the old single setting `buzz_relay_url` is gone (no compat for earlier opt2 dev formats). Only the list is read.
+ *   When the old env is still present the list reports a clear problem (and Buzz ops refuse with
+ *   `buzz_relay_setting_removed` while the list is empty) instead of silently running without a relay.
  * - Owner input is untrusted: only wss://, no path/query/userinfo, and no loopback/private/link-local/local-name host
  *   (sync check here; the DNS answers are checked again on every use by net-policy + the pinned fetch).
  *   `ws://` and private hosts only for exact allowlisted origins (tests / in-process test relays). There is no
@@ -46,11 +47,15 @@ export interface RelayList {
 
 const show = (entry: string) => (entry.length > 80 ? `${entry.slice(0, 77)}...` : entry).replace(/[\p{Cc}\p{Cf}]/gu, "");
 
-/** Workspace relays: the old single setting first (one-release fallback), then the `buzz_relays` list. */
-export function workspaceRelayList(input: { list?: string | null; legacy?: string | null; allowOrigins?: readonly string[] }): RelayList {
-  const entries = [input.legacy ?? "", ...(input.list ?? "").split(/[\s,;]+/u)].map((e) => e.trim()).filter(Boolean);
+/** Owner-facing text when the removed single-relay setting is still set (C133). */
+export const OLD_RELAY_SETTING_PROBLEM =
+  "The old setting \"Buzz relay address\" (buzz_relay_url) is no longer read. Put the address in Buzz relays in Connect's settings in Portal.";
+
+/** Workspace relays: the `buzz_relays` list only. `oldSettingPresent` = the removed `buzz_relay_url` env is still set. */
+export function workspaceRelayList(input: { list?: string | null; oldSettingPresent?: boolean; allowOrigins?: readonly string[] }): RelayList {
+  const entries = (input.list ?? "").split(/[\s,;]+/u).map((e) => e.trim()).filter(Boolean);
   const relays: string[] = [];
-  const problems: string[] = [];
+  const problems: string[] = input.oldSettingPresent ? [OLD_RELAY_SETTING_PROBLEM] : [];
   for (const entry of entries) {
     let relay: string;
     try {
