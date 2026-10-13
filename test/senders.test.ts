@@ -87,7 +87,7 @@ async function setup(readEvents: NostrEvent[] = []) {
 
 test("manifest 0.4.0: identities_list is agent read-only without receipt; sender ops are person writes; account scope shares sender instances", () => {
   const ops = Object.fromEntries(manifest.operations.map((o) => [o.id, o]));
-  assert.equal(manifest.version, "0.5.2");
+  assert.equal(manifest.version, "0.5.3");
   const list = ops.identities_list;
   assert.deepEqual([list?.audience, list?.effect, list?.idempotency, list?.receipt, list?.scopeType], ["agent", "read", "none", false, undefined]);
   assert.deepEqual(list?.crud, ["read"]);
@@ -286,4 +286,15 @@ test("F15: channel_inbox lists mentions as <service>:<id> and mentionsMe when th
     [true, ["slack:U0BOTA"]],
     [false, ["slack:U0SOMEONE"]],
   ]);
+});
+
+test("0.5.3 (F76): every operation title is unique, so the approval form never shows two identical rows", () => {
+  const seen = new Map<string, string>();
+  for (const o of manifest.operations) {
+    assert.equal(seen.get(o.title), undefined, `"${o.title}" is the title of ${seen.get(o.title)} and ${o.id}`);
+    seen.set(o.title, o.id);
+  }
+  const title = (id: string) => manifest.operations.find((o) => o.id === id)?.title;
+  assert.equal(title("buzz_dm"), "Direct message a known person on Buzz");
+  assert.equal(title("channel_dm"), "Direct message a known person on a chat service");
 });
