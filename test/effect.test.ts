@@ -93,3 +93,46 @@ test("C107: every outward or money class carries a hold family (resolve answers 
   assert.equal(classifyMcpTool("lookup", { readOnlyHint: false, openWorldHint: true }).holdFamily, "outward");
   assert.equal(classifyMcpTool("send_invoice_payment", undefined).holdFamily, "money");
 });
+
+test("F84: read-led names stay reads (drafts, labels, send-as); real verbs and sends still win", () => {
+  const gmail = loadPolicies().get("gmail");
+  assert.ok(gmail);
+  for (const slug of ["GMAIL_LIST_LABELS", "GMAIL_LIST_DRAFTS", "GMAIL_GET_DRAFT", "GMAIL_GET_LABEL", "GMAIL_LIST_SEND_AS", "GMAIL_GET_SEND_AS", "GMAIL_GET_PROFILE", "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID", "GMAIL_LIST_HISTORY", "GMAIL_SEARCH_PEOPLE"]) {
+    const cls = classifyComposioTool(slug, gmail);
+    assert.equal(cls.effect, "read", slug);
+    assert.deepEqual(cls.crud, ["read"], slug);
+    assert.equal(levelAllows("read", cls.crud), true, `READ tier can call ${slug}`);
+  }
+  for (const [slug, effect] of [
+    ["GMAIL_CREATE_EMAIL_DRAFT", "write"], ["GMAIL_UPDATE_DRAFT", "write"], ["GMAIL_CREATE_LABEL", "write"], ["GMAIL_REMOVE_LABEL", "write"],
+    ["GMAIL_SEND_DRAFT", "outward"], ["GMAIL_SEND_EMAIL", "outward"], ["GMAIL_GET_AND_SEND", "outward"], ["GMAIL_DELETE_DRAFT", "destructive"],
+    ["GMAIL_DELETE_LABEL", "destructive"], ["GMAIL_MOVE_TO_TRASH", "destructive"],
+  ] as const) assert.equal(classifyComposioTool(slug, gmail).effect, effect, slug);
+  // The same name rule without a policy (catalog, MCP): a noun word after a leading read verb is not a verb.
+  for (const name of ["list_drafts", "get_draft", "list_labels", "get_message", "fetch_email", "get_comment"]) assert.equal(inferFromName(name).effect, "read", name);
+  for (const [name, effect] of [["create_draft", "write"], ["send_message", "outward"], ["get_and_send_message", "outward"], ["get_and_delete_draft", "destructive"], ["post_comment", "outward"]] as const)
+    assert.equal(inferFromName(name).effect, effect, name);
+});
+
+test("F84: every curated toolkit policy classifies read-led list/get/fetch/search names as read", () => {
+  const policies = loadPolicies();
+  assert.ok(policies.size >= 2);
+  const nouns = ["DRAFT", "DRAFTS", "LABEL", "LABELS", "MESSAGE", "MESSAGES", "EVENTS", "SETTINGS", "ACL", "CALENDARS", "PROFILE", "THREADS"];
+  for (const [toolkit, policy] of policies) {
+    const prefix = toolkit.toUpperCase();
+    for (const verb of ["GET", "LIST", "FETCH", "SEARCH", "FIND"]) {
+      for (const noun of nouns) assert.equal(classifyComposioTool(`${prefix}_${verb}_${noun}`, policy).effect, "read", `${prefix}_${verb}_${noun}`);
+    }
+  }
+});
+
+test("F84: Google Calendar policy: list/get reads (ACL, settings) stay reads; event writes and attendee changes keep their class", () => {
+  const cal = loadPolicies().get("googlecalendar");
+  assert.ok(cal);
+  for (const slug of ["GOOGLECALENDAR_LIST_CALENDARS", "GOOGLECALENDAR_EVENTS_LIST", "GOOGLECALENDAR_ACL_LIST", "GOOGLECALENDAR_ACL_GET", "GOOGLECALENDAR_SETTINGS_GET", "GOOGLECALENDAR_SETTINGS_LIST", "GOOGLECALENDAR_FIND_FREE_SLOTS", "GOOGLECALENDAR_GET_CALENDAR"])
+    assert.equal(classifyComposioTool(slug, cal).effect, "read", slug);
+  for (const [slug, effect] of [
+    ["GOOGLECALENDAR_CREATE_EVENT", "outward"], ["GOOGLECALENDAR_REMOVE_ATTENDEE", "outward"], ["GOOGLECALENDAR_ACL_INSERT", "outward"],
+    ["GOOGLECALENDAR_DELETE_EVENT", "destructive"], ["GOOGLECALENDAR_BATCH_EVENTS", "destructive"], ["GOOGLECALENDAR_SETTINGS_WATCH", "outward"],
+  ] as const) assert.equal(classifyComposioTool(slug, cal).effect, effect, slug);
+});

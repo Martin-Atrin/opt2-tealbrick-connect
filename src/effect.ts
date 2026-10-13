@@ -87,13 +87,25 @@ export function namesMoney(name: string): boolean {
 }
 
 /**
+ * Words that are mostly NOUNS in a tool name ("get_draft", "list_labels", "get_message"). After a leading read verb they do not
+ * make the tool a write or outward one (F84: GMAIL_LIST_DRAFTS and GMAIL_LIST_LABELS were `write`). They still count when the name
+ * does not start with a read verb ("create_email_draft", "send_message"), and a real verb (send, delete, create, update, ...)
+ * anywhere in a read-led name still wins.
+ */
+const NOUN_PARTS = new Set(["draft", "label", "message", "email", "comment", "tag", "star", "call", "trash", "archive", "schedule", "dm", "sms"]);
+
+/**
  * Name inference for a tool without labels (SEC-02, fail closed): money → `money`; destructive verbs → destructive;
  * outward verbs → outward; write verbs → write; read only when a read verb is present and no other class applies;
  * a name with no known verb → write + outward. Composio policy files and MCP annotations override this.
+ * F84: when the FIRST verb of the name is a read verb, the ambiguous noun words (NOUN_PARTS) are not counted as verbs.
  */
 export function inferFromName(name: string): ToolClass {
-  const parts = name.toLowerCase().split(/[^a-z0-9]+/u).filter(Boolean);
-  if (parts.some((part) => MONEY_PARTS.has(part))) return classify({ write: true, outward: true, destructive: false, money: true });
+  const all = name.toLowerCase().split(/[^a-z0-9]+/u).filter(Boolean);
+  if (all.some((part) => MONEY_PARTS.has(part))) return classify({ write: true, outward: true, destructive: false, money: true });
+  const isVerb = (part: string) => READ_PARTS.has(part) || DESTRUCTIVE_PARTS.has(part) || OUTWARD_PARTS.has(part) || WRITE_PARTS.has(part);
+  const lead = all.find((part) => isVerb(part) && !NOUN_PARTS.has(part));
+  const parts = lead !== undefined && READ_PARTS.has(lead) ? all.filter((part) => !NOUN_PARTS.has(part)) : all;
   const destructive = parts.some((part) => DESTRUCTIVE_PARTS.has(part));
   const outward = parts.some((part) => OUTWARD_PARTS.has(part));
   const write = parts.some((part) => WRITE_PARTS.has(part));

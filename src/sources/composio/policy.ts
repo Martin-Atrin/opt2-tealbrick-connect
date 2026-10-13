@@ -1,7 +1,7 @@
 /**
  * Curated per-toolkit policies (harvest: v1 composio-policy.ts). Composio tool names hide writes
- * (`*_PATCH`, `*_WATCH`) and outward actions; a policy pins the class. Order: destructive → outward → writes →
- * reads → name inference. With a policy present, its patterns override name inference (e.g. GMAIL_REMOVE_LABEL
+ * (`*_PATCH`, `*_WATCH`) and outward actions; a policy pins the class. Order: see classifyComposioTool (exact slugs, read-led
+ * names, destructive → outward → writes → reads → name inference). With a policy present, its patterns override name inference (e.g. GMAIL_REMOVE_LABEL
  * is a write, not destructive). Policies are our own labels and ship inside the image.
  */
 import { readdirSync, readFileSync } from "node:fs";
@@ -65,13 +65,27 @@ export function loadPolicies(dir = join(import.meta.dirname, "../../../policies/
   return map;
 }
 
+const READ = { write: false, outward: false, destructive: false } as const;
+
+/**
+ * Order (F84): money → exact slugs of the policy (a pattern without `*`, any list) → a read-led name that holds no write, outward
+ * or destructive verb (so GMAIL_LIST_DRAFTS / GMAIL_LIST_LABELS / GOOGLECALENDAR_ACL_LIST stay reads although `*DRAFT*`, `*LABEL*`,
+ * `ACL_*` patterns would catch them) → destructive → outward → writes → reads patterns → name inference.
+ * A slug with a real mutating verb (GMAIL_GET_AND_SEND) is never read-led, so the policy patterns still decide it.
+ */
 export function classifyComposioTool(slug: string, policy: ComposioPolicy | undefined): ToolClass {
   // Money movement is always `money` (always held), whatever a policy says about the tool.
   if (namesMoney(slug)) return classify({ write: true, outward: true, destructive: false, money: true });
   if (!policy) return inferFromName(slug);
+  const exact = (patterns: readonly string[]) => patterns.some((p) => !p.includes("*") && p.toLowerCase() === slug.toLowerCase());
+  if (exact(policy.destructive)) return classify({ write: true, outward: false, destructive: true });
+  if (exact(policy.outward)) return classify({ write: true, outward: true, destructive: false });
+  if (exact(policy.writes)) return classify({ write: true, outward: false, destructive: false });
+  if (exact(policy.reads)) return classify(READ);
+  if (inferFromName(slug).effect === "read") return classify(READ);
   if (matches(policy.destructive, slug)) return classify({ write: true, outward: false, destructive: true });
   if (matches(policy.outward, slug)) return classify({ write: true, outward: true, destructive: false });
   if (matches(policy.writes, slug)) return classify({ write: true, outward: false, destructive: false });
-  if (matches(policy.reads, slug)) return classify({ write: false, outward: false, destructive: false });
+  if (matches(policy.reads, slug)) return classify(READ);
   return inferFromName(slug); // fail closed for slugs the policy does not name (SEC-02)
 }

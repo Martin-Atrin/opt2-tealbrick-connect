@@ -188,6 +188,14 @@ test("catalog search offers only connected services; resolve returns the class",
   assert.deepEqual(await dyn.resolve("gmail_send_email", hookCtx), { tool: "gmail_send_email", crud: ["create", "update"], effect: "outward", holdFamily: "outward" });
   assert.equal(hits[0]?.holdFamily, "outward");
   assert.deepEqual(await dyn.resolve("gmail_fetch_emails", hookCtx), { tool: "gmail_fetch_emails", crud: ["read"], effect: "read" });
+  // F85: natural queries find the tool by word overlap with its title and description, not only its slug.
+  for (const query of ["gmail list messages inbox", "gmail fetch emails", "list my emails", "GMAIL: Fetch Messages"]) {
+    const found = await dyn.catalog({ query }, hookCtx);
+    assert.equal(found[0]?.name, "gmail_fetch_emails", `${query} → ${found.map((e) => e.name).join(",")}`);
+  }
+  assert.deepEqual((await dyn.catalog({ query: "send a message" }, hookCtx)).slice(0, 1).map((e) => e.name), ["gmail_send_email"]);
+  assert.deepEqual(await dyn.catalog({ query: "zzzz qqqq" }, hookCtx), []);
+  assert.deepEqual(await dyn.catalog({ query: "calendar events" }, hookCtx), []); // no connected calendar service
 });
 
 test("services search reports a missing Composio key instead of failing", async () => {

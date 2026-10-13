@@ -138,28 +138,62 @@ export class ToolRegistry {
   }
 
   /**
-   * Search tools of the given services. Every query word must appear in name, title, description or service;
-   * results ordered by how many words hit the name/service first. Empty query lists the first `limit` tools.
+   * Search tools of the given services (F85). The query is tokenised (case-insensitive, light plural folding, list/fetch/get/find/search/read verbs folded to one word) and a tool matches
+   * when ANY word hits its name, title, description or service; results are ranked by word overlap (name and service words count
+   * most, then title, then description), ties by name. A tool must hit at least one word that is not just its own service name,
+   * unless every query word names a service. Empty query lists the first `limit` tools.
    */
   search(query: string, services: readonly string[], limit = 20): DynamicCatalogEntry[] {
     if (services.length === 0) return [];
-    const words = query.toLowerCase().split(/[^a-z0-9]+/u).filter((w) => w.length > 1).slice(0, 8);
+    const words = [...new Set(tokens(query))].slice(0, 12);
     const placeholders = services.map(() => "?").join(", ");
-    const where = [`service IN (${placeholders})`];
-    const params: unknown[] = [...services];
-    for (const word of words) {
-      where.push("(lower(name) LIKE ? OR lower(title) LIKE ? OR lower(description) LIKE ? OR lower(service) LIKE ?)");
-      const like = `%${word}%`;
-      params.push(like, like, like, like);
-    }
+    // Ranking needs the folded words of every row, so the SQL only scopes by service (a few hundred rows per service at most).
     const rows = this.#db
-      .prepare(`SELECT * FROM connect_tools WHERE ${where.join(" AND ")} ORDER BY service, name LIMIT 500`)
-      .all(...params)
+      .prepare(`SELECT * FROM connect_tools WHERE service IN (${placeholders}) ORDER BY service, name LIMIT 5000`)
+      .all(...services)
       .map(fromRow);
-    const score = (row: ToolRow) => words.filter((w) => row.name.includes(w) || row.service.includes(w)).length;
-    return rows
-      .sort((a, b) => score(b) - score(a) || a.name.localeCompare(b.name))
-      .slice(0, Math.max(1, Math.min(limit, 50)))
-      .map(toEntry);
+    if (words.length === 0) return rows.slice(0, Math.max(1, Math.min(limit, 50))).map(toEntry);
+    const everyWordIsAService = words.every((w) => services.some((svc) => tokens(svc).includes(w)));
+    const ranked = rows
+      .map((row) => ({ row, ...scoreRow(row, words) }))
+      .filter((r) => r.score > 0 && (r.outside > 0 || everyWordIsAService))
+      .sort((a, b) => b.score - a.score || a.row.name.localeCompare(b.row.name));
+    return ranked.slice(0, Math.max(1, Math.min(limit, 50))).map((r) => toEntry(r.row));
   }
+}
+
+/** Verbs that ask for the same thing in a tool name ("list messages" finds "fetch emails"): folded to one word on both sides. */
+const READ_SYNONYMS = new Set(["list", "fetch", "get", "find", "search", "retrieve", "read", "lookup", "show", "query"]);
+
+/** Lower-case words of a text; plural folded (messages → message, entries → entry, fetches → fetch); read verbs folded; one-letter words dropped. */
+export function tokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter((w) => w.length > 1)
+    .map((w) => {
+      if (READ_SYNONYMS.has(w)) return "get";
+      if (w.length > 4 && w.endsWith("ies")) return `${w.slice(0, -3)}y`;
+      if (w.length > 4 && /(ches|shes|sses|xes)$/u.test(w)) return w.slice(0, -2);
+      if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
+      return w;
+    });
+}
+
+/** Word overlap: per query word the best field weight (name/service 3, title 2, description 1); `outside` counts words hit outside the service name. */
+function scoreRow(row: ToolRow, words: readonly string[]): { score: number; outside: number } {
+  const name = new Set(tokens(row.name));
+  const service = new Set(tokens(row.service));
+  const title = new Set(tokens(row.title));
+  const description = new Set(tokens(row.description));
+  let score = 0;
+  let outside = 0;
+  for (const w of words) {
+    const inService = service.has(w);
+    const inName = name.has(w);
+    const best = inName || inService ? 3 : title.has(w) ? 2 : description.has(w) ? 1 : 0;
+    score += best;
+    if (best > 0 && !inService) outside++;
+  }
+  return { score, outside };
 }
