@@ -136,6 +136,8 @@ export function testCtx(input: {
     ownerLink: () => null,
     companionTargets: () => [],
     appsPolicy: () => null,
+    agentScopeRequest: () => null,
+    ownerLinkFor: () => null,
     db: input.db,
     log: { debug() {}, info() {}, warn() {}, error() {} },
     signal: new AbortController().signal,
@@ -160,6 +162,8 @@ export function eventCtx(db: Db): SdkEventContext {
     ownerLink: () => null,
     companionTargets: () => [],
     appsPolicy: () => null,
+    agentScopeRequest: () => null,
+    ownerLinkFor: () => null,
   };
 }
 
