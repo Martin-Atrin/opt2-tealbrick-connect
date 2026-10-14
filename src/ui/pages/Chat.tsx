@@ -1,13 +1,15 @@
 /** Chat bots (C58): connect a Slack, Teams, Telegram or Discord bot for one agent; see inbound status. */
-import { Button, Tag } from "@opt2-tealbrick/ui";
-import { type FormEvent, useId, useState } from "react";
+import { Button, Card, Field, type FlowStep, Segmented, Select, StepFlow, Swatch, Switch, Tag, TextInput } from "@opt2-tealbrick/ui";
+import { useState } from "react";
 
-import { Notice, StatusLabel } from "../components.tsx";
+import { LoadError, Notice, PageHead, StatusLabel } from "../components.tsx";
 import { errorText, useLoad } from "../hooks.ts";
 import { type ChannelProviderInfo, channelAccountConnect, channelAccounts, channelProviders } from "../ops.ts";
 
-const NAMES: Record<ChannelProviderInfo["service"], string> = { slack: "Slack", teams: "Microsoft Teams", telegram: "Telegram", discord: "Discord" };
-const HELP: Record<ChannelProviderInfo["service"], string> = {
+type Service = ChannelProviderInfo["service"];
+
+const NAMES: Record<Service, string> = { slack: "Slack", teams: "Microsoft Teams", telegram: "Telegram", discord: "Discord" };
+const HELP: Record<Service, string> = {
   slack: "Create a Slack app with Socket Mode on, install it, then paste the bot token (xoxb-…) and the app-level token (xapp-…, scope connections:write).",
   teams: "Create a single-tenant Azure Bot. Set its messaging endpoint to your workspace door: https://<bridge>/p/connect/inbound/teams.",
   telegram: "Create a bot with @BotFather and paste its token. People must start a chat with the bot before it can message them.",
@@ -18,105 +20,196 @@ const label = (field: string) => field.replace(/_/gu, " ").replace(/^./u, (c) =>
 export function Chat() {
   const providers = useLoad(channelProviders);
   const accounts = useLoad(channelAccounts);
-  const [service, setService] = useState<ChannelProviderInfo["service"] | null>(null);
-  const picked = providers.data?.services.find((p) => p.service === service) ?? null;
+  const [service, setService] = useState<Service | null>(null);
+  const [adding, setAdding] = useState(false);
+  const services = providers.data?.services ?? [];
+  const picked = services.find((p) => p.service === service) ?? services[0] ?? null;
   return (
-    <section aria-labelledby="chat-title">
-      <h2 id="chat-title">Chat bots</h2>
-      <p>Give an agent its own bot on Slack, Teams, Telegram or Discord. Messages to the bot reach the agent's inbox; set the agent's access to the bot on the Accounts page.</p>
-      {providers.error ? <Notice tone="error">{providers.error}</Notice> : null}
-      <div className="row">
-        {(providers.data?.services ?? []).map((p) => (
-          <Button key={p.service} variant={service === p.service ? "primary" : "secondary"} onClick={() => setService(p.service)}>
-            {NAMES[p.service]}
-          </Button>
-        ))}
-      </div>
+    <section className="app-page" aria-label="Chat bots">
+      <PageHead
+        title="Chat bots"
+        lede="Give an agent its own bot on Slack, Teams, Telegram or Discord. Messages to the bot reach the agent’s inbox; set the agent’s access to the bot on the Accounts page."
+      />
+      {providers.error ? <LoadError message={providers.error} busy={providers.loading} onRetry={() => void providers.reload()} /> : null}
       {picked ? (
-        <ConnectForm
+        <>
+          <Segmented<Service>
+            label="Provider"
+            options={services.map((p) => ({ value: p.service, label: p.service === "teams" ? "Teams" : NAMES[p.service] }))}
+            value={picked.service}
+            onChange={setService}
+          />
+          <Card className="bot-card">
+            <h2 className="sub-head">{NAMES[picked.service]}</h2>
+            <p className="tb-soft">{HELP[picked.service]}</p>
+            <div className="tb-ctas">
+              <Button variant="primary" onClick={() => setAdding(true)}>
+                {`Connect a ${NAMES[picked.service]} bot`}
+              </Button>
+            </div>
+          </Card>
+        </>
+      ) : null}
+      {adding && picked ? (
+        <BotFlow
+          key={picked.service}
           provider={picked}
           agents={providers.data?.agents ?? []}
-          onDone={() => {
-            setService(null);
-            void accounts.reload();
-          }}
+          onConnected={() => void accounts.reload()}
+          onClose={() => setAdding(false)}
         />
       ) : null}
-      <h3>Connected bots</h3>
-      {accounts.error ? <Notice tone="error">{accounts.error}</Notice> : null}
-      {accounts.data && accounts.data.accounts.length === 0 ? <p>No chat bots yet.</p> : null}
-      <ul className="list">
-        {(accounts.data?.accounts ?? []).map((a) => (
-          <li key={a.id} className="card">
-            <strong>{a.label}</strong> <Tag tone="neutral">{NAMES[a.service as ChannelProviderInfo["service"]] ?? a.service}</Tag> <StatusLabel status={a.status} />
-            {a.bot ? (
-              <p className="muted">
-                Bot {a.bot.name}. Inbound: {a.bot.inbound}
-                {a.bot.detail ? ` (${a.bot.detail})` : ""}
-              </p>
-            ) : null}
-          </li>
-        ))}
-      </ul>
+      <h2 className="sub-head">Connected bots</h2>
+      {accounts.error ? <LoadError message={accounts.error} busy={accounts.loading} onRetry={() => void accounts.reload()} /> : null}
+      {accounts.data && accounts.data.accounts.length === 0 ? <p className="tb-soft">No chat bots yet.</p> : null}
+      {accounts.data && accounts.data.accounts.length > 0 ? (
+        <div className="ruled">
+          {accounts.data.accounts.map((a) => (
+            <div key={a.id} className="item">
+              <Swatch />
+              <h3>{a.label}</h3>
+              {a.bot ? (
+                <p>
+                  Bot {a.bot.name}. Inbound: {a.bot.inbound}
+                  {a.bot.detail ? ` (${a.bot.detail})` : ""}
+                </p>
+              ) : null}
+              <div className="side">
+                <Tag>{NAMES[a.service as Service] ?? a.service}</Tag>
+                <StatusLabel status={a.status} />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
 
-function ConnectForm(props: { provider: ChannelProviderInfo; agents: { id: string; name: string }[]; onDone(): void }) {
-  const id = useId();
-  const [labelText, setLabel] = useState(NAMES[props.provider.service]);
+/** Bot set-up in steps (C126): the bot, its keys, its settings (only when the provider has any), then done. */
+function BotFlow(props: { provider: ChannelProviderInfo; agents: { id: string; name: string }[]; onConnected(): void; onClose(): void }) {
+  const { provider } = props;
+  const toggles = provider.settingFields.filter((f) => f.type === "boolean");
+  const [labelText, setLabel] = useState(NAMES[provider.service]);
   const [agent, setAgent] = useState(props.agents[0]?.id ?? "");
   const [creds, setCreds] = useState<Record<string, string>>({});
-  const [settings, setSettings] = useState<Record<string, string | boolean>>(Object.fromEntries(props.provider.settingFields.map((f) => [f.key, f.default])));
-  const [busy, setBusy] = useState(false);
+  const [settings, setSettings] = useState<Record<string, string | boolean>>(Object.fromEntries(provider.settingFields.map((f) => [f.key, f.default])));
   const [error, setError] = useState<string | null>(null);
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
+  const [connected, setConnected] = useState(false);
+  const [step, setStep] = useState(0);
+
+  const fail = (message: string): false => {
+    setError(message);
+    return false;
+  };
+  const bot = (): boolean => {
+    if (!labelText.trim()) return fail("Give this bot a name.");
+    if (!agent) return fail("Pick the agent this bot speaks for.");
+    setError(null);
+    return true;
+  };
+  const keys = (): boolean => {
+    if (provider.credentialFields.some((f) => !creds[f])) return fail("Fill in every key field.");
+    setError(null);
+    return true;
+  };
+  const keysLast = toggles.length === 0;
+  const connect = async (): Promise<boolean> => {
+    if (connected) return true; // connected already: never send the keys twice
     setError(null);
     try {
-      await channelAccountConnect({ service: props.provider.service, label: labelText, agent, credentials: creds, settings });
-      props.onDone();
+      await channelAccountConnect({ service: provider.service, label: labelText, agent, credentials: creds, settings });
+      setCreds({});
+      setConnected(true);
+      props.onConnected();
+      return true;
     } catch (e) {
       setError(errorText(e));
-    } finally {
-      setBusy(false);
+      return false;
     }
   };
-  return (
-    <form className="form card" onSubmit={(e) => void submit(e)}>
-      <p className="muted">{HELP[props.provider.service]}</p>
-      <div className="field">
-        <label htmlFor={`${id}-label`}>Name</label>
-        <input id={`${id}-label`} value={labelText} onChange={(e) => setLabel(e.target.value)} maxLength={60} required />
-      </div>
-      <div className="field">
-        <label htmlFor={`${id}-agent`}>Agent this bot speaks for</label>
-        <select id={`${id}-agent`} value={agent} onChange={(e) => setAgent(e.target.value)} required>
-          {props.agents.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.name}
-            </option>
+
+  const failure = error ? <Notice tone="error">{error}</Notice> : null;
+  const steps: FlowStep[] = [
+    {
+      name: "Bot",
+      onNext: bot,
+      render: () => (
+        <>
+          <p className="tb-soft">{HELP[provider.service]}</p>
+          <Field label="Name">
+            <TextInput value={labelText} onChange={(e) => setLabel(e.target.value)} maxLength={60} disabled={connected} />
+          </Field>
+          <Field label="Agent this bot speaks for">
+            <Select options={props.agents.map((a) => ({ value: a.id, label: a.name }))} value={agent} onValueChange={setAgent} placeholder="Choose an agent" disabled={connected} />
+          </Field>
+          {props.agents.length === 0 ? <p className="tb-hint">No agents yet. Add an agent in Tealbrick Portal first.</p> : null}
+          {step === 0 ? failure : null}
+        </>
+      ),
+    },
+    {
+      name: "Keys",
+      nextLabel: keysLast ? (connected ? "Next" : "Connect bot") : "Next",
+      onNext: keysLast ? async () => keys() && (await connect()) : keys,
+      render: () => (
+        <>
+          {provider.credentialFields.map((f) => (
+            <Field key={f} label={label(f)}>
+              <TextInput type="password" autoComplete="off" value={creds[f] ?? ""} onChange={(e) => setCreds({ ...creds, [f]: e.target.value })} disabled={connected} />
+            </Field>
           ))}
-        </select>
-      </div>
-      {props.provider.credentialFields.map((f) => (
-        <div className="field" key={f}>
-          <label htmlFor={`${id}-${f}`}>{label(f)}</label>
-          <input id={`${id}-${f}`} type="password" autoComplete="off" value={creds[f] ?? ""} onChange={(e) => setCreds({ ...creds, [f]: e.target.value })} required />
-        </div>
-      ))}
-      {props.provider.settingFields.map((f) =>
-        f.type === "boolean" ? (
-          <label key={f.key} className="row">
-            <input type="checkbox" checked={settings[f.key] === true || settings[f.key] === "true"} onChange={(e) => setSettings({ ...settings, [f.key]: e.target.checked })} /> {f.label}
-          </label>
-        ) : null,
-      )}
-      {error ? <Notice tone="error">{error}</Notice> : null}
-      <Button type="submit" variant="primary" disabled={busy || !agent}>
-        Connect bot
-      </Button>
-    </form>
+          <p className="tb-hint">The keys stay in Connect. Connect never shows them again.</p>
+          {step === 1 ? failure : null}
+        </>
+      ),
+    },
+    ...(toggles.length > 0
+      ? [
+          {
+            name: "Settings",
+            nextLabel: connected ? "Next" : "Connect bot",
+            onNext: connect,
+            render: () => (
+              <>
+                {toggles.map((f) => (
+                  <Switch
+                    key={f.key}
+                    label={f.label}
+                    checked={settings[f.key] === true || settings[f.key] === "true"}
+                    onCheckedChange={(on) => setSettings({ ...settings, [f.key]: on })}
+                    disabled={connected}
+                  />
+                ))}
+                {step === 2 ? failure : null}
+              </>
+            ),
+          } satisfies FlowStep,
+        ]
+      : []),
+    {
+      name: "Done",
+      nextLabel: "Done",
+      render: () => (
+        <Notice tone="ok">
+          “{labelText}” is connected. Set what the agent may do with it on the Accounts page.
+        </Notice>
+      ),
+    },
+  ];
+  return (
+    <StepFlow
+      open
+      kicker="Chat bots"
+      title={`Connect a ${NAMES[provider.service]} bot`}
+      steps={steps}
+      step={step}
+      onStepChange={(i) => {
+        setError(null);
+        setStep(i);
+      }}
+      onClose={props.onClose}
+      onFinish={props.onClose}
+    />
   );
 }

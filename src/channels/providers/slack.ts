@@ -56,7 +56,7 @@ export const SLACK_APP_MANIFEST = {
   display_information: {
     name: "Teal Brick Connect",
     description: "Your Teal Brick agents read and post in the Slack channels you invite them to.",
-    background_color: "#0f5e5c",
+    background_color: "#0f5e5c", // check-system: allow (Slack app manifest value, not Connect UI)
   },
   features: {
     bot_user: { display_name: "Teal Brick", always_online: false },

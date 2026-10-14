@@ -1,9 +1,10 @@
-import { Button } from "@opt2-tealbrick/ui";
-import { type FormEvent, useEffect, useId, useState } from "react";
+import { Button, Card, Field, Progress, Select, StepFlow, Tag, TextInput, TextLink } from "@opt2-tealbrick/ui";
+import { useEffect, useState } from "react";
 
-import { Notice } from "../components.tsx";
+import { LoadError, Notice, PageHead, ServiceTile } from "../components.tsx";
 import { errorText, useLoad } from "../hooks.ts";
 import { type AccountKind, accountConnect, accountsOverview, agentsList, catalogAccountConnect, type ServiceHit, servicesSearch } from "../ops.ts";
+import { hrefOf } from "../router.ts";
 
 const POLL_MS = 2000;
 const POLL_MAX_MS = 5 * 60 * 1000;
@@ -16,12 +17,18 @@ interface Watch {
   detail: string;
 }
 
+const SearchIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+    <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" />
+    <path d="m12.5 12.5 4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+  </svg>
+);
+
 export function Services(props: { onOpenAccounts(): void }) {
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<ServiceHit | null>(null);
   const [watch, setWatch] = useState<Watch | null>(null);
-  const searchId = useId();
 
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(query.trim()), 300);
@@ -75,233 +82,323 @@ export function Services(props: { onOpenAccounts(): void }) {
     };
   }, [watchedId]);
 
+  /** Closing the flow keeps a connection that still waits (the page shows its progress); a finished one is shown in the flow already. */
+  const closeFlow = () => {
+    setPicked(null);
+    setWatch((w) => (w && w.phase !== "waiting" ? null : w));
+  };
+
   return (
-    <div className="page">
-      <h2>Services</h2>
-      <p className="lede">Search the services you can connect, then sign in to your account of that service.</p>
-      <div className="field">
-        <label htmlFor={searchId}>Search services</label>
-        <input id={searchId} type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Gmail, Calendar, Slack" autoComplete="off" maxLength={80} />
+    <section className="app-page" aria-label="Services">
+      <PageHead title="Services" lede="Search the services you can connect, then sign in to your account of that service." />
+      <div className="tb-search">
+        <SearchIcon />
+        <TextInput type="search" aria-label="Search services" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Gmail, Calendar, Slack" autoComplete="off" maxLength={80} />
       </div>
 
-      {watch ? <WatchPanel watch={watch} onOpenAccounts={props.onOpenAccounts} onClose={() => setWatch(null)} /> : null}
+      {watch && !picked ? <WatchPanel watch={watch} onOpenAccounts={props.onOpenAccounts} onClose={() => setWatch(null)} /> : null}
 
-      {results.error ? <Notice tone="error">{results.error}</Notice> : null}
+      {results.error ? <LoadError message={results.error} busy={results.loading} onRetry={() => void results.reload()} /> : null}
       {results.data && !results.data.composioKey ? (
-        <Notice>Add your Composio API key: in Teal Brick Portal open Connect's keys (the key page of your workspace). Connect never shows the key.</Notice>
+        <Notice>Add your Composio API key: in Tealbrick Portal open Connect’s keys (the key page of your workspace). Connect never shows the key.</Notice>
       ) : null}
-      {results.loading && !results.data ? <p className="muted">Loading services.</p> : null}
-      {results.data?.catalogAvailable === false ? <Notice>The Tealbrick catalog of self-hosted apps is not available right now.</Notice> : null}
-      {results.data && results.data.services.length === 0 && !results.loading ? <p className="muted">No service matches this search.</p> : null}
+      {results.loading && !results.data ? (
+        <p className="tb-soft" role="status">
+          Loading services.
+        </p>
+      ) : null}
+      {results.data?.catalogAvailable === false ? <Notice>The Tealbrick catalog of self-hosted apps isn’t available right now.</Notice> : null}
+      {results.data && results.data.services.length === 0 && !results.loading ? <p className="tb-soft">No service matches this search.</p> : null}
 
       <ul className="cards" aria-label="Services">
         {(results.data?.services ?? []).map((service) => (
-          <li key={service.service} className="card">
-            <ServiceCard
-              service={service}
-              open={picked === service.service}
-              onOpen={() => setPicked(service.service)}
-              onClose={() => setPicked(null)}
-              onStarted={(started) => {
-                setPicked(null);
-                setWatch(started);
-              }}
-            />
+          <li key={service.service}>
+            <ServiceCard service={service} busy={picked !== null} onOpen={() => setPicked(service)} />
           </li>
         ))}
       </ul>
-    </div>
+
+      {picked ? <ConnectFlow key={picked.service} service={picked} watch={watch} onWatch={setWatch} onClose={closeFlow} onOpenAccounts={props.onOpenAccounts} /> : null}
+    </section>
   );
 }
 
 function WatchPanel(props: { watch: Watch; onOpenAccounts(): void; onClose(): void }) {
   const { watch } = props;
   return (
-    <section className="panel" aria-label="Connection progress">
+    <section aria-label="Connection progress" className="watch">
       {watch.phase === "waiting" ? (
         <Notice>
-          Waiting for you to finish signing in for "{watch.label}". If no window opened,{" "}
-          <a href={watch.redirectUrl} target="_blank" rel="noopener noreferrer">
+          Waiting for you to finish signing in for “{watch.label}”. If no window opened,{" "}
+          <TextLink href={watch.redirectUrl} target="_blank" rel="noopener noreferrer">
             open the sign-in page
-          </a>
+          </TextLink>
           .
         </Notice>
       ) : null}
       {watch.phase === "connected" ? (
-        <Notice>
-          "{watch.label}" is connected. Next, set what each agent may do with it in{" "}
-          <a
-            href="./configure"
-            onClick={(e) => {
-              e.preventDefault();
-              props.onOpenAccounts();
-            }}
-          >
-            Accounts
-          </a>
-          .
+        <Notice tone="ok">
+          “{watch.label}” is connected. Next, set what each agent may do with it in <AccountsLink onOpen={props.onOpenAccounts} />.
         </Notice>
       ) : null}
-      {watch.phase === "failed" ? <Notice tone="error">"{watch.label}" did not connect.{watch.detail ? ` ${watch.detail}` : ""}</Notice> : null}
-      {watch.phase === "timeout" ? <Notice tone="error">No answer after 5 minutes for "{watch.label}". Check Accounts to see if it connected, or try again.</Notice> : null}
-      {watch.phase !== "waiting" ? (
-        <Button type="button" variant="secondary" onClick={props.onClose}>
-          Dismiss
-        </Button>
+      {watch.phase === "failed" ? (
+        <Notice tone="error">
+          “{watch.label}” didn’t connect.{watch.detail ? ` ${watch.detail}` : ""}
+        </Notice>
       ) : null}
+      {watch.phase === "timeout" ? <Notice tone="error">No answer after 5 minutes for “{watch.label}”. Check Accounts to see if it connected, or try again.</Notice> : null}
+      {watch.phase !== "waiting" ? <Button onClick={props.onClose}>Dismiss</Button> : null}
     </section>
   );
 }
 
-function ServiceCard(props: { service: ServiceHit; open: boolean; onOpen(): void; onClose(): void; onStarted(watch: Watch): void }) {
-  const { service } = props;
+function AccountsLink({ onOpen }: { onOpen(): void }) {
   return (
-    <>
-      <div className="card-head">
-        <h3 className="card-title">{service.name}</h3>
-        <ConnectState service={service} open={props.open} onOpen={props.onOpen} />
-      </div>
-      {service.description ? <p className="card-text">{service.description}</p> : null}
-      {props.open ? <ConnectForm service={service} onCancel={props.onClose} onStarted={props.onStarted} /> : null}
-    </>
+    <TextLink
+      href={hrefOf("accounts")}
+      onClick={(e) => {
+        e.preventDefault();
+        onOpen();
+      }}
+    >
+      Accounts
+    </TextLink>
   );
 }
 
-function ConnectState({ service, open, onOpen }: { service: ServiceHit; open: boolean; onOpen(): void }) {
+function ServiceCard(props: { service: ServiceHit; busy: boolean; onOpen(): void }) {
+  const { service } = props;
+  return (
+    <Card as="article" className="svc-card">
+      <div className="tb-row">
+        <ServiceTile name={service.name} />
+        <h3>{service.name}</h3>
+      </div>
+      {service.description ? <p className="tb-soft">{service.description}</p> : null}
+      {service.source === "catalog" ? (
+        <div>
+          <Tag>Tealbrick catalog</Tag>
+        </div>
+      ) : null}
+      <ConnectState {...props} />
+    </Card>
+  );
+}
+
+function ConnectState({ service, busy, onOpen }: { service: ServiceHit; busy: boolean; onOpen(): void }) {
   switch (service.connectMode) {
     case "needs_auth_config":
-      return <span className="muted note">Needs an OAuth app in your Composio dashboard first.</span>;
+      return <p className="tb-hint">Needs an OAuth app in your Composio dashboard first.</p>;
     case "no_auth":
-      return <span className="muted note">Needs no sign-in.</span>;
+      return <p className="tb-hint">Needs no sign-in.</p>;
     case "not_supported":
-      return <span className="muted note">Cannot be connected yet.</span>;
+      return <p className="tb-hint">Can’t be connected yet.</p>;
     default:
       return (
-        <Button type="button" variant="primary" onClick={onOpen} disabled={open} aria-label={`Connect ${service.name}`}>
-          Connect
-        </Button>
+        <div className="tb-ctas">
+          <Button variant="primary" size="sm" onClick={onOpen} disabled={busy} aria-label={`Connect ${service.name}`}>
+            Connect
+          </Button>
+        </div>
       );
   }
 }
 
 const FIELD_LABEL: Record<string, string> = { token: "API token", username: "Username", password: "Password" };
+const KIND_OPTIONS = [
+  { value: "as_me", label: "As me" },
+  { value: "as_itself", label: "As itself", meta: "one agent’s own account" },
+];
 
-/** Kind ("As me" / "As itself") and, for "As itself", the agent picker; shared by both connect forms. */
-function useKindFields() {
-  const ids = { kind: useId(), agent: useId() };
-  const [kind, setKind] = useState<AccountKind>("as_me");
-  const [agent, setAgent] = useState("");
+/** Kind ("As me" / "As itself") and, for "As itself", the agent picker; shared by both connect flows. */
+function KindFields({ kind, agent, onKind, onAgent, locked }: { kind: AccountKind; agent: string; onKind(k: AccountKind): void; onAgent(a: string): void; locked: boolean }) {
   const agents = useLoad(agentsList, kind);
-  const node = (
+  return (
     <>
-      <div className="field">
-        <label htmlFor={ids.kind}>Use this account</label>
-        <select id={ids.kind} value={kind} onChange={(e) => setKind(e.target.value as AccountKind)}>
-          <option value="as_me">As me</option>
-          <option value="as_itself">As itself (one agent's own account)</option>
-        </select>
-      </div>
+      <Field label="Use this account">
+        <Select options={KIND_OPTIONS} value={kind} onValueChange={(v) => onKind(v as AccountKind)} disabled={locked} />
+      </Field>
       {kind === "as_itself" ? (
-        <div className="field">
-          <label htmlFor={ids.agent}>Agent</label>
-          <select id={ids.agent} value={agent} onChange={(e) => setAgent(e.target.value)} required>
-            <option value="">Choose an agent</option>
-            {(agents.data ?? []).map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-          {agents.error ? <Notice tone="error">{agents.error}</Notice> : null}
-        </div>
+        <Field label="Agent">
+          <Select
+            options={(agents.data ?? []).map((a) => ({ value: a.id, label: a.name }))}
+            value={agent}
+            onValueChange={onAgent}
+            placeholder="Choose an agent"
+            disabled={locked}
+          />
+        </Field>
       ) : null}
+      {kind === "as_itself" && agents.error ? <Notice tone="error">{agents.error}</Notice> : null}
     </>
   );
-  return { kind, agent, node };
 }
 
-function FormButtons(props: { busy: boolean; submitLabel: string; onCancel(): void }) {
-  return (
-    <div className="row">
-      <Button type="submit" variant="primary" disabled={props.busy}>
-        {props.busy ? "Working" : props.submitLabel}
-      </Button>
-      <Button type="button" variant="secondary" onClick={props.onCancel} disabled={props.busy}>
-        Cancel
-      </Button>
-    </div>
-  );
+function ConnectFlow(props: { service: ServiceHit; watch: Watch | null; onWatch(watch: Watch): void; onClose(): void; onOpenAccounts(): void }) {
+  return props.service.source === "catalog" ? <CatalogFlow service={props.service} onClose={props.onClose} onOpenAccounts={props.onOpenAccounts} /> : <ComposioFlow {...props} />;
 }
 
-function ConnectForm(props: { service: ServiceHit; onCancel(): void; onStarted(watch: Watch): void }) {
-  return props.service.source === "catalog" ? <CatalogForm {...props} /> : <ComposioForm {...props} />;
-}
-
-/** Composio services: sign in through a popup, then wait for the account to become connected. */
-function ComposioForm(props: { service: ServiceHit; onCancel(): void; onStarted(watch: Watch): void }) {
+/** Composio services (choose, sign in, progress, done): sign in through a popup, then wait for the account to become connected. */
+function ComposioFlow(props: { service: ServiceHit; watch: Watch | null; onWatch(watch: Watch): void; onClose(): void; onOpenAccounts(): void }) {
   const { service } = props;
-  const labelId = useId();
   const [label, setLabel] = useState(service.name);
-  const [busy, setBusy] = useState(false);
+  const [kind, setKind] = useState<AccountKind>("as_me");
+  const [agent, setAgent] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const { kind, agent, node } = useKindFields();
+  const [step, setStep] = useState(0);
+  const [startedId, setStartedId] = useState<string | null>(null);
+  const watch = props.watch && props.watch.accountId === startedId ? props.watch : null;
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setError(null);
+  // The connection ended (connected, failed or timed out) while the owner looks at the progress step: show the result.
+  useEffect(() => {
+    if (step === 2 && watch && watch.phase !== "waiting") setStep(3);
+  }, [step, watch]);
+
+  const account = () => {
     if (!label.trim()) return setError("Give this account a label.");
     if (kind === "as_itself" && !agent) return setError("Pick the agent this account belongs to.");
-    setBusy(true);
+    setError(null);
+    return true;
+  };
+
+  const signIn = async (): Promise<boolean> => {
+    if (startedId) return true; // the sign-in window was opened already: never start a second connection
+    setError(null);
     try {
       const out = await accountConnect({ service: service.service, label: label.trim(), kind, ...(kind === "as_itself" ? { agent } : {}) });
       let target: URL;
       try {
         target = new URL(out.redirectUrl);
       } catch {
-        throw new Error("The sign-in address is not valid.");
+        throw new Error("The sign-in address isn’t valid.");
       }
-      if (target.protocol !== "https:") throw new Error("The sign-in address is not secure.");
+      if (target.protocol !== "https:") throw new Error("The sign-in address isn’t secure.");
       window.open(target.href, "tb-connect-signin", "popup,width=520,height=720,noopener,noreferrer");
-      props.onStarted({ accountId: out.account.id, label: out.account.label, redirectUrl: target.href, phase: "waiting", detail: "" });
+      setStartedId(out.account.id);
+      props.onWatch({ accountId: out.account.id, label: out.account.label, redirectUrl: target.href, phase: "waiting", detail: "" });
+      return true;
     } catch (e) {
       setError(errorText(e));
-      setBusy(false);
+      return false;
     }
   };
 
+  const failure = error ? <Notice tone="error">{error}</Notice> : null;
   return (
-    <form className="form" onSubmit={submit} aria-label={`Connect ${service.name}`}>
-      <div className="field">
-        <label htmlFor={labelId}>Label</label>
-        <input id={labelId} value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} required />
-      </div>
-      {node}
-      {error ? <Notice tone="error">{error}</Notice> : null}
-      <FormButtons busy={busy} submitLabel="Sign in and connect" onCancel={props.onCancel} />
-    </form>
+    <StepFlow
+      open
+      kicker="Connect"
+      title={service.name}
+      step={step}
+      onStepChange={(i) => {
+        setError(null);
+        setStep(i);
+      }}
+      onClose={props.onClose}
+      onFinish={props.onClose}
+      steps={[
+        {
+          name: "Account",
+          onNext: () => account() === true,
+          render: () => (
+            <>
+              <Field label="Label">
+                <TextInput value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} disabled={startedId !== null} />
+              </Field>
+              <KindFields kind={kind} agent={agent} onKind={setKind} onAgent={setAgent} locked={startedId !== null} />
+              {step === 0 ? failure : null}
+            </>
+          ),
+        },
+        {
+          name: "Sign in",
+          nextLabel: startedId ? "Next" : "Sign in and connect",
+          onNext: signIn,
+          render: () => (
+            <>
+              <p className="tb-soft">
+                {startedId
+                  ? `The sign-in window for ${service.name} was opened. Go on to follow the connection.`
+                  : `A sign-in window for ${service.name} opens next. Sign in to your own account there, then come back here.`}
+              </p>
+              {step === 1 ? failure : null}
+            </>
+          ),
+        },
+        {
+          name: "Progress",
+          canNext: watch !== null && watch.phase !== "waiting",
+          render: () => (
+            <>
+              <Progress label="Waiting for the sign-in" />
+              {watch ? (
+                <p className="tb-soft">
+                  Waiting for you to finish signing in for “{watch.label}”. If no window opened,{" "}
+                  <TextLink href={watch.redirectUrl} target="_blank" rel="noopener noreferrer">
+                    open the sign-in page
+                  </TextLink>
+                  . You can close this window and come back; Connect keeps checking.
+                </p>
+              ) : null}
+            </>
+          ),
+        },
+        {
+          name: "Done",
+          nextLabel: "Done",
+          render: () =>
+            watch?.phase === "connected" ? (
+              <Notice tone="ok">
+                “{watch.label}” is connected. Next, set what each agent may do with it in{" "}
+                <AccountsLink
+                  onOpen={() => {
+                    props.onClose();
+                    props.onOpenAccounts();
+                  }}
+                />
+                .
+              </Notice>
+            ) : watch?.phase === "failed" ? (
+              <Notice tone="error">
+                “{watch.label}” didn’t connect.{watch.detail ? ` ${watch.detail}` : ""}
+              </Notice>
+            ) : watch?.phase === "timeout" ? (
+              <Notice tone="error">No answer after 5 minutes for “{watch.label}”. Check Accounts to see if it connected, or try again.</Notice>
+            ) : null,
+        },
+      ]}
+    />
   );
 }
 
-/** Catalog (self-hosted) services: address and API credentials; the account is connected at once, no popup. */
-function CatalogForm(props: { service: ServiceHit; onCancel(): void; onStarted(watch: Watch): void }) {
+/** Catalog (self-hosted) services (choose, keys, done): address and API credentials; the account is connected at once, no popup. */
+function CatalogFlow(props: { service: ServiceHit; onClose(): void; onOpenAccounts(): void }) {
   const { service } = props;
-  const ids = { label: useId(), baseUrl: useId(), field: useId() };
   const fields = service.fields && service.fields.length > 0 ? service.fields : ["token"];
   const [label, setLabel] = useState(service.name);
   const [baseUrl, setBaseUrl] = useState("");
   const [credentials, setCredentials] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
+  const [kind, setKind] = useState<AccountKind>("as_me");
+  const [agent, setAgent] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const { kind, agent, node } = useKindFields();
+  const [result, setResult] = useState<Watch | null>(null);
+  const [step, setStep] = useState(0);
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setError(null);
+  const account = () => {
     if (!label.trim()) return setError("Give this account a label.");
     if (!baseUrl.trim()) return setError("Enter the address of the app.");
-    if (fields.some((f) => !credentials[f])) return setError("Fill in every credential field.");
     if (kind === "as_itself" && !agent) return setError("Pick the agent this account belongs to.");
-    setBusy(true);
+    setError(null);
+    return true;
+  };
+
+  const connect = async (): Promise<boolean> => {
+    if (result) return true; // connected already: never send the credentials twice
+    setError(null);
+    if (fields.some((f) => !credentials[f])) {
+      setError("Fill in every credential field.");
+      return false;
+    }
     try {
       const out = await catalogAccountConnect({
         service: service.service,
@@ -312,53 +409,100 @@ function CatalogForm(props: { service: ServiceHit; onCancel(): void; onStarted(w
         ...(kind === "as_itself" ? { agent } : {}),
       });
       setCredentials({});
-      props.onStarted({ accountId: out.account.id, label: out.account.label, redirectUrl: "", phase: out.account.status === "failed" ? "failed" : "connected", detail: out.account.detail });
+      setResult({ accountId: out.account.id, label: out.account.label, redirectUrl: "", phase: out.account.status === "failed" ? "failed" : "connected", detail: out.account.detail });
+      return true;
     } catch (e) {
       setError(errorText(e));
-      setBusy(false);
+      return false;
     }
   };
 
+  const failure = error ? <Notice tone="error">{error}</Notice> : null;
   return (
-    <form className="form" onSubmit={submit} aria-label={`Connect ${service.name}`} autoComplete="off">
-      <div className="field">
-        <label htmlFor={ids.label}>Label</label>
-        <input id={ids.label} value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} required />
-      </div>
-      <div className="field">
-        <label htmlFor={ids.baseUrl}>Address of the app</label>
-        <input
-          id={ids.baseUrl}
-          type="url"
-          inputMode="url"
-          value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
-          placeholder={service.baseUrlExample ?? "https://"}
-          maxLength={300}
-          autoComplete="off"
-          spellCheck={false}
-          required
-        />
-      </div>
-      {fields.map((field) => (
-        <div className="field" key={field}>
-          <label htmlFor={`${ids.field}-${field}`}>{FIELD_LABEL[field] ?? field}</label>
-          <input
-            id={`${ids.field}-${field}`}
-            type="password"
-            value={credentials[field] ?? ""}
-            onChange={(e) => setCredentials((c) => ({ ...c, [field]: e.target.value }))}
-            maxLength={4096}
-            autoComplete="new-password"
-            spellCheck={false}
-            required
-          />
-        </div>
-      ))}
-      <p className="muted">The key stays in Connect. Connect never shows it again.</p>
-      {node}
-      {error ? <Notice tone="error">{error}</Notice> : null}
-      <FormButtons busy={busy} submitLabel="Connect" onCancel={props.onCancel} />
-    </form>
+    <StepFlow
+      open
+      kicker="Connect"
+      title={service.name}
+      step={step}
+      onStepChange={(i) => {
+        setError(null);
+        setStep(i);
+      }}
+      onClose={props.onClose}
+      onFinish={props.onClose}
+      steps={[
+        {
+          name: "Account",
+          onNext: () => account() === true,
+          render: () => (
+            <>
+              <Field label="Label">
+                <TextInput value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} disabled={result !== null} />
+              </Field>
+              <Field label="Address of the app">
+                <TextInput
+                  type="url"
+                  inputMode="url"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  placeholder={service.baseUrlExample ?? "https://"}
+                  maxLength={300}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={result !== null}
+                />
+              </Field>
+              <KindFields kind={kind} agent={agent} onKind={setKind} onAgent={setAgent} locked={result !== null} />
+              {step === 0 ? failure : null}
+            </>
+          ),
+        },
+        {
+          name: "Keys",
+          nextLabel: result ? "Next" : "Connect",
+          onNext: connect,
+          render: () => (
+            <>
+              {fields.map((field) => (
+                <Field key={field} label={FIELD_LABEL[field] ?? field}>
+                  <TextInput
+                    type="password"
+                    value={credentials[field] ?? ""}
+                    onChange={(e) => setCredentials((c) => ({ ...c, [field]: e.target.value }))}
+                    maxLength={4096}
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    disabled={result !== null}
+                  />
+                </Field>
+              ))}
+              <p className="tb-hint">The key stays in Connect. Connect never shows it again.</p>
+              {step === 1 ? failure : null}
+            </>
+          ),
+        },
+        {
+          name: "Done",
+          nextLabel: "Done",
+          render: () =>
+            result?.phase === "connected" ? (
+              <Notice tone="ok">
+                “{result.label}” is connected. Next, set what each agent may do with it in{" "}
+                <AccountsLink
+                  onOpen={() => {
+                    props.onClose();
+                    props.onOpenAccounts();
+                  }}
+                />
+                .
+              </Notice>
+            ) : result?.phase === "failed" ? (
+              <Notice tone="error">
+                “{result.label}” didn’t connect.{result.detail ? ` ${result.detail}` : ""}
+              </Notice>
+            ) : null,
+        },
+      ]}
+    />
   );
 }

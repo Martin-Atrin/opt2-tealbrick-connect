@@ -7,19 +7,6 @@ export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
 
-/**
- * RUL-01: Approve / Deny on the Holds page. An expired hold, a 409 or a network error must reach the owner as a message,
- * never as an unhandled rejection. Returns the error text, or null when the decision went through.
- */
-export async function decideOrError<D extends string>(decide: (id: never, decision: D) => Promise<void>, id: string, decision: D): Promise<string | null> {
-  try {
-    await decide(id as never, decision);
-    return null;
-  } catch (e) {
-    return errorText(e);
-  }
-}
-
 export interface Loaded<T> {
   data: T | null;
   error: string | null;

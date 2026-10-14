@@ -1,7 +1,7 @@
-import { Button, Dialog } from "@opt2-tealbrick/ui";
+import { Button, Dialog, Switch, Table } from "@opt2-tealbrick/ui";
 import { useState } from "react";
 
-import { ConfirmDialog, Notice } from "../components.tsx";
+import { ConfirmDialog, LoadError, Notice, PageHead } from "../components.tsx";
 import { copyText, errorText, useLoad } from "../hooks.ts";
 import { type BuzzIdentity, buzzAgentRelaysSet, buzzIdentitiesGenerate, buzzIdentitiesList, buzzIdentityRotate, buzzProfilePublish } from "../ops.ts";
 
@@ -71,28 +71,30 @@ export function Buzz() {
   };
 
   return (
-    <div className="page">
-      <h2>Buzz</h2>
-      <p className="lede">Each agent gets its own Buzz identity. Add these npubs to your channels in Buzz.</p>
-      {message ? <Notice tone={message.error ? "error" : "info"}>{message.text}</Notice> : null}
-      {list.error ? <Notice tone="error">{list.error}</Notice> : null}
+    <section className="app-page" aria-label="Buzz">
+      <PageHead title="Buzz" lede="Each agent gets its own Buzz identity. Add these npubs to your channels in Buzz." />
+      {message ? <Notice tone={message.error ? "error" : "ok"}>{message.text}</Notice> : null}
+      {list.error ? <LoadError message={list.error} busy={list.loading} onRetry={() => void list.reload()} /> : null}
 
-      <section aria-labelledby="buzz-relays">
-        <h3 id="buzz-relays">Relays</h3>
-        {relays.length === 0 ? (
-          <p>No relay is set. Set the Buzz relays in Teal Brick Portal, in Connect's settings.</p>
-        ) : (
+      <section className="tb-stack" aria-labelledby="buzz-relays">
+        <h2 id="buzz-relays" className="sub-head">
+          Relays
+        </h2>
+        {list.data && relays.length === 0 ? (
+          <p className="tb-soft">No relay is set. Set the Buzz relays in Tealbrick Portal, in Connect’s settings.</p>
+        ) : null}
+        {relays.length > 0 ? (
           <>
             <ol className="relay-list">
               {relays.map((r) => (
                 <li key={r}>
-                  <code>{r}</code>
+                  <code className="tb-mono">{r}</code>
                 </li>
               ))}
             </ol>
-            <p className="muted">Agents post to every relay they use and read from all of them. You change the list in Teal Brick Portal, in Connect's settings.</p>
+            <p className="tb-hint">Agents post to every relay they use and read from all of them. You change the list in Tealbrick Portal, in Connect’s settings.</p>
           </>
-        )}
+        ) : null}
         {relayProblems.length > 0 ? (
           <Notice tone="error">
             {relayProblems.map((p) => (
@@ -105,76 +107,78 @@ export function Buzz() {
         ) : null}
       </section>
 
-      <div className="row actions">
-        <Button type="button" variant="primary" disabled={busy !== null || rows.length === 0} onClick={() => void generate()}>
+      <div className="tb-ctas">
+        <Button variant="primary" disabled={busy !== null || rows.length === 0} onClick={() => void generate()}>
           Create Buzz identities for all agents
         </Button>
-        <Button type="button" variant="secondary" disabled={withIdentity.length === 0} onClick={() => void copyAll()}>
+        <Button disabled={withIdentity.length === 0} onClick={() => void copyAll()}>
           Copy all npubs
         </Button>
         <Button
-          type="button"
-          variant="secondary"
           disabled={busy !== null || withIdentity.length === 0 || relays.length === 0}
-          title={relays.length > 0 ? undefined : "Set the Buzz relays in Connect's settings in Portal first"}
+          title={relays.length > 0 ? undefined : "Set the Buzz relays in Connect’s settings in Portal first"}
           onClick={() => void publish()}
         >
           Publish profiles
         </Button>
       </div>
 
-      {list.loading && !list.data ? <p className="muted">Loading agents.</p> : null}
-      {list.data && rows.length === 0 ? <p className="muted">No agents yet. Add an agent in Teal Brick Portal first.</p> : null}
+      {list.loading && !list.data ? (
+        <p className="tb-soft" role="status">
+          Loading agents.
+        </p>
+      ) : null}
+      {list.data && rows.length === 0 ? <p className="tb-soft">No agents yet. Add an agent in Tealbrick Portal first.</p> : null}
 
       {rows.length > 0 ? (
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Agent</th>
-                <th scope="col">npub</th>
-                <th scope="col">Created</th>
-                <th scope="col">Relays</th>
-                <th scope="col">
-                  <span className="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.agent}>
-                  <td data-label="Agent">{row.name}</td>
-                  <td data-label="npub">
-                    {row.identity ? (
-                      <div className="npub-cell">
-                        <code className="npub">{row.identity.npub}</code>
-                        <CopyButton text={row.identity.npub} label={`Copy npub of ${row.name}`} />
-                      </div>
-                    ) : (
-                      <span className="muted">No identity yet</span>
-                    )}
-                  </td>
-                  <td data-label={row.identity ? "Created" : ""}>{row.identity ? formatCreated(row.identity.createdAt) : ""}</td>
-                  <td data-label="Relays">
-                    <span>{relayLabel(row.relays, relays)}</span>{" "}
+        <Table aria-label="Buzz identities">
+          <thead>
+            <tr>
+              <th scope="col">Agent</th>
+              <th scope="col">npub</th>
+              <th scope="col">Created</th>
+              <th scope="col">Relays</th>
+              <th scope="col">
+                <span className="tb-sr">Actions</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.agent}>
+                <td className="strong">{row.name}</td>
+                <td>
+                  {row.identity ? (
+                    <div className="npub-cell">
+                      <code className="tb-mono npub">{row.identity.npub}</code>
+                      <CopyButton text={row.identity.npub} label={`Copy npub of ${row.name}`} />
+                    </div>
+                  ) : (
+                    <span className="tb-muted">No identity yet</span>
+                  )}
+                </td>
+                <td className="num">{row.identity ? formatCreated(row.identity.createdAt) : ""}</td>
+                <td>
+                  <span className="relay-cell">
+                    <span>{relayLabel(row.relays, relays)}</span>
                     {relays.length > 1 ? (
-                      <Button type="button" variant="secondary" size="sm" disabled={busy !== null} onClick={() => setChoosing({ agent: row.agent, name: row.name, relays: row.relays })} aria-label={`Choose relays of ${row.name}`}>
+                      <Button size="sm" disabled={busy !== null} onClick={() => setChoosing({ agent: row.agent, name: row.name, relays: row.relays })} aria-label={`Choose relays of ${row.name}`}>
                         Choose
                       </Button>
                     ) : null}
-                  </td>
-                  <td data-label="">
-                    {row.identity ? (
-                      <Button type="button" variant="danger" disabled={busy !== null} onClick={() => setRotating({ agent: row.agent, name: row.name })} aria-label={`Replace key of ${row.name}`}>
-                        Replace key
-                      </Button>
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  </span>
+                </td>
+                <td>
+                  {row.identity ? (
+                    <Button size="sm" variant="danger" disabled={busy !== null} onClick={() => setRotating({ agent: row.agent, name: row.name })} aria-label={`Replace key of ${row.name}`}>
+                      Replace key
+                    </Button>
+                  ) : null}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
       ) : null}
 
       {choosing ? (
@@ -206,7 +210,7 @@ export function Buzz() {
           if (target) void rotate(target);
         }}
       />
-    </div>
+    </section>
   );
 }
 
@@ -214,8 +218,8 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   return (
     <Button
-      type="button"
-      variant="secondary" size="sm"
+      size="sm"
+      variant="quiet"
       aria-label={label}
       onClick={async () => {
         setState((await copyText(text)) ? "copied" : "failed");
@@ -248,27 +252,26 @@ function RelayDialog(props: { name: string; workspace: string[]; selected: strin
       busy={props.busy}
       footer={
         <>
-          <Button variant="secondary" onClick={props.onCancel}>
-            Cancel
-          </Button>
+          <Button onClick={props.onCancel}>Cancel</Button>
           <Button variant="primary" disabled={props.busy || (!all && picked.length === 0)} onClick={() => props.onSave(all ? null : picked)}>
             Save
           </Button>
         </>
       }
     >
-      <label className="row">
-        <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Use all relays (also relays you add later)
-      </label>
-      <fieldset disabled={all} className="relay-choices">
-        <legend>Relays this agent uses</legend>
-        {props.workspace.map((relay) => (
-          <label key={relay} className="row">
-            <input type="checkbox" checked={all || chosen.includes(relay)} onChange={(e) => toggle(relay, e.target.checked)} /> <code>{relay}</code>
-          </label>
-        ))}
+      <Switch label="Use all relays (also relays you add later)" checked={all} onCheckedChange={setAll} />
+      <fieldset disabled={all} className="tb-stack relay-choices">
+        <legend className="tb-label relay-legend">Relays this agent uses</legend>
+        <div className="tb-checks">
+          {props.workspace.map((relay) => (
+            <label key={relay} className="tb-check">
+              <input type="checkbox" checked={all || chosen.includes(relay)} onChange={(e) => toggle(relay, e.target.checked)} />
+              <span className="tb-check-title tb-mono">{relay}</span>
+            </label>
+          ))}
+        </div>
       </fieldset>
-      {!all && picked.length === 0 ? <p className="muted">Choose at least one relay.</p> : null}
+      {!all && picked.length === 0 ? <p className="tb-hint">Choose at least one relay.</p> : null}
     </Dialog>
   );
 }

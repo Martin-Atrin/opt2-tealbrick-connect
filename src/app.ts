@@ -1201,7 +1201,7 @@ const encodeCursor = (key: string): string => Buffer.from(key, "utf8").toString(
 
 function callbackPage(ok: boolean, title: string, detail: string, status: number): Response {
   return new Response(
-    `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;padding:2rem"><h1>${title}</h1><p>${detail}</p><p>You can close this window.</p><script>window.opener&&window.opener.postMessage({connect:${ok ? "true" : "false"}},"*")</script></body>`,
+    `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;padding:2rem"><h1>${title}</h1><p>${detail}</p><p>You can close this window.</p><script>window.opener&&window.opener.postMessage({connect:${ok ? "true" : "false"}},"*")</script></body>`, // check-system: allow (standalone sign-in popup page: no kit stylesheet is served at the callback address)
     { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } },
   );
 }

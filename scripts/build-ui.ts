@@ -1,6 +1,8 @@
 // Copied from create-tealbrick-miniapp 0.1.1 template scripts/build-ui.ts (C53 BSA-06: one build pattern).
-// Connect additions, marked CONNECT: statement-only import scan, its own stylesheet src/ui/app.css, and dist/ui/ops.json (person-op facts read from
+// Connect additions, marked CONNECT: statement-only import scan, and dist/ui/ops.json (person-op facts read from
 // tealbrick.manifest.json, so the UI holds no hand-copied manifest data — BSA-08).
+// Design 0.2.0 (C150), merged from the template build-ui: pages.css + app.css are linked after the kit sheets, Nunito fonts + OFL.txt are copied
+// beside tokens.css, the kit's still goes to stills/. The template's C61 content-hash directory is NOT adopted here (ops.json and tests keep the flat layout).
 // UI build without a bundler. `tsc -p tsconfig.build.json` has emitted src/ui as ES modules to dist/ui; this script
 // copies the browser dependencies next to it and writes dist/ui/index.html with an import map:
 // - ES module packages (@opt2-tealbrick/ui, @opt2-tealbrick/miniapp-sdk/client, ...) are copied file by file, only
@@ -10,11 +12,14 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeF
 import { builtinModules, createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { appArt } from "@opt2-tealbrick/ui";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const out = join(root, "dist", "ui");
 const VENDOR = "vendor";
 const STYLES = ["@opt2-tealbrick/ui/tokens.css", "@opt2-tealbrick/ui/components.css"];
+/** The app's own stylesheets, after the kit sheets so they can use the tokens. pages.css = the template's page layout; app.css = Connect's layout only. */
+const APP_STYLES = ["pages.css", "app.css"];
 
 /** CommonJS entries (production builds), by bare specifier: package, file inside it, package to resolve it from. */
 const CJS: Record<string, { pkg: string; file: string; from?: string }> = {
@@ -137,13 +142,44 @@ while (pending.length > 0) {
 }
 
 // 3. stylesheets + index.html
+/** Files a vendored stylesheet refers to with a relative url() (fonts) are copied to the same relative place. */
+function copyCssAssets(source: string, vendored: string): void {
+  const refs = new Set([...readFileSync(source, "utf8").matchAll(/url\(\s*["']?(\.{1,2}\/[^"')?#]+)/g)].map((m) => m[1] as string));
+  for (const ref of refs) {
+    const from = resolve(dirname(source), ref);
+    if (!existsSync(from)) fail(`${source} refers to ${ref}, which is not in the package`);
+    const to = resolve(dirname(vendored), ref);
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(from, to);
+    const licence = join(dirname(from), "OFL.txt"); // the font licence travels with the font
+    if (existsSync(licence)) copyFileSync(licence, join(dirname(to), "OFL.txt"));
+  }
+}
 const links = STYLES.map((s) => {
   const file = realpathSync(requireFrom(join(root, "package.json")).resolve(s));
-  return `<link rel="stylesheet" href="${urlOf(vendorPath(file))}" />`;
+  const vendored = vendorPath(file);
+  copyCssAssets(file, vendored);
+  return `<link rel="stylesheet" href="${urlOf(vendored)}" />`;
 });
-// CONNECT: the app stylesheet, after the ui stylesheets.
-copyFileSync(join(root, "src", "ui", "app.css"), join(out, "app.css"));
-links.push(`<link rel="stylesheet" href="./app.css" />`);
+for (const name of APP_STYLES) {
+  const file = join(root, "src", "ui", name);
+  if (!existsSync(file)) continue;
+  copyFileSync(file, join(out, name));
+  links.push(`<link rel="stylesheet" href="./${name}" />`);
+}
+// the kit's still for this product id (interim lookup by id, kit APPS table; Connect's art slug is "marketplace")
+const productId = (JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as { id: string }).id;
+const art = appArt(productId, "stills/");
+if (art) {
+  const apps = join(pkgDir("@opt2-tealbrick/ui", join(root, "package.json")), "assets", "apps");
+  mkdirSync(join(out, "stills"), { recursive: true });
+  for (const url of [art.still, art.still2x]) {
+    if (!url) continue;
+    const file = url.slice("stills/".length);
+    if (!existsSync(join(apps, file))) fail(`the kit has no ${file} in assets/apps`);
+    copyFileSync(join(apps, file), join(out, "stills", file));
+  }
+}
 // CONNECT: person-op facts from the manifest (the UI asks for idempotency keys only where the manifest requires them).
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as {
   operations: { id: string; audience: string; idempotency: string }[];
