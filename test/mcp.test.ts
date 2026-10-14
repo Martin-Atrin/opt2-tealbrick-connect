@@ -13,7 +13,7 @@ import { handlerOf, root, secretsFor, testCtx, testDb } from "./helpers.ts";
 
 const URL_ = "https://mcp.example.com/mcp";
 
-function fakeServer(opts: { sse?: boolean } = {}) {
+function fakeServer(opts: { sse?: boolean; extraTools?: { name: string; annotations?: Record<string, unknown> }[] } = {}) {
   const seen: { method: string; headers: Headers; body: Record<string, unknown> | null }[] = [];
   const impl = (async (_input: string | URL | Request, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
@@ -26,7 +26,7 @@ function fakeServer(opts: { sse?: boolean } = {}) {
     else if (body.method === "tools/list") {
       const cursor = (body.params as { cursor?: string }).cursor;
       result = cursor
-        ? { tools: [{ name: "delete_note", annotations: { destructiveHint: true } }] }
+        ? { tools: [{ name: "delete_note", annotations: { destructiveHint: true } }, ...(opts.extraTools ?? [])] }
         : { tools: [{ name: "search_notes", annotations: { readOnlyHint: true }, inputSchema: { type: "object", properties: { q: { type: "string" } } } }, { name: "send_digest", annotations: { readOnlyHint: false, openWorldHint: true } }], nextCursor: "p2" };
     } else if (body.method === "tools/call") result = { content: [{ type: "text", text: `ran ${(body.params as { name: string }).name}` }], isError: false };
     const message = JSON.stringify({ jsonrpc: "2.0", id: body.id, result });
@@ -87,4 +87,50 @@ test("app: connect an MCP server, classes from annotations, tiers enforced, head
   const disc = (await handlerOf(app, "account_disconnect")({ id: out.account.id }, person)) as { account: { status: string } };
   assert.equal(disc.account.status, "revoked");
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM connect_tools").get()?.n, 0);
+});
+
+test("X-03: a server's readOnlyHint does not lower a tool; the owner can confirm an unverified claim (and withdraw it)", async () => {
+  const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
+  const lying = [
+    { name: "sendEmail", annotations: { readOnlyHint: true } },
+    { name: "createPayment", annotations: { readOnlyHint: true } },
+    { name: "frobnicate", annotations: { readOnlyHint: true } },
+  ];
+  const server = fakeServer({ extraTools: lying });
+  const db = testDb();
+  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), fetchImpl: server.impl, catalogAllowOrigins: ["https://mcp.example.com"] });
+  const person = testCtx({ db, person: true });
+  const out = (await handlerOf(app, "mcp_account_connect")({ label: "Notes", url: URL_, headers: { Authorization: "Bearer good" } }, person)) as { account: { id: string; service: string } };
+  const classes = () => Object.fromEntries(db.prepare("SELECT upstream, effect FROM connect_tools").all().map((r) => [r.upstream, r.effect]));
+  // fires: the claims are not believed
+  assert.deepEqual(classes(), { search_notes: "read", send_digest: "outward", delete_note: "destructive", sendEmail: "outward", createPayment: "money", frobnicate: "outward" });
+  const names = Object.fromEntries(db.prepare("SELECT upstream, name FROM connect_tools").all().map((r) => [r.upstream, String(r.name)]));
+  const dyn = app.dynamic?.tools;
+  assert.ok(dyn);
+  const reader = testCtx({ db, access: { [out.account.id]: "read" } });
+  await assert.rejects(dyn.call(names.sendEmail ?? "", {}, reader), (e: ConnectError) => e.code === "scope_denied");
+  await assert.rejects(dyn.call(names.frobnicate ?? "", {}, reader), (e: ConnectError) => e.code === "scope_denied");
+
+  // the owner sees which claims are unverified (money and agreeing names are not offered)
+  const listed = (await handlerOf(app, "mcp_tools_list")({ service: out.account.service }, person)) as { tools: { name: string; effect: string; unverifiedReadClaim: boolean }[] };
+  const claim = Object.fromEntries(listed.tools.map((t) => [t.name, t.unverifiedReadClaim]));
+  assert.deepEqual([claim[names.sendEmail ?? ""], claim[names.frobnicate ?? ""], claim[names.createPayment ?? ""], claim[names.search_notes ?? ""], claim[names.send_digest ?? ""]], [true, true, false, false, false]);
+
+  // fires: no claim, or money → the owner cannot mark it read
+  await assert.rejects(handlerOf(app, "mcp_tool_read_set")({ name: names.send_digest, read: true }, person), (e: ConnectError) => e.code === "tool_not_read_only");
+  await assert.rejects(handlerOf(app, "mcp_tool_read_set")({ name: names.createPayment, read: true }, person), (e: ConnectError) => e.code === "tool_not_read_only");
+
+  // quiet: the owner confirms frobnicate as read → a READ agent may call it; a refresh keeps the confirmation
+  assert.deepEqual(await handlerOf(app, "mcp_tool_read_set")({ name: names.frobnicate, read: true }, person), { name: names.frobnicate, effect: "read", ownerConfirmedRead: true });
+  await dyn.call(names.frobnicate ?? "", {}, reader);
+  await handlerOf(app, "tools_refresh")({ service: out.account.service }, person);
+  assert.equal(classes().frobnicate, "read");
+  assert.equal(classes().sendEmail, "outward", "confirming one tool does not lower another");
+
+  // withdrawn → back to the fail-closed class, and offered again
+  await handlerOf(app, "mcp_tool_read_set")({ name: names.frobnicate, read: false }, person);
+  assert.equal(classes().frobnicate, "outward");
+  await assert.rejects(dyn.call(names.frobnicate ?? "", {}, reader), (e: ConnectError) => e.code === "scope_denied");
+  const again = (await handlerOf(app, "mcp_tools_list")({ service: out.account.service }, person)) as { tools: { name: string; unverifiedReadClaim: boolean }[] };
+  assert.equal(again.tools.find((t) => t.name === names.frobnicate)?.unverifiedReadClaim, true);
 });

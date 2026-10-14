@@ -16,6 +16,7 @@ import { BuzzRefusal, BuzzRelay } from "./channels/buzz/relay.ts";
 import { ChannelError, type ChannelNet, type ChannelProvider, type ChannelService as ChannelServiceId } from "./channels/provider.ts";
 import { channelProviders } from "./channels/registry.ts";
 import { ChannelHub, isChannelService } from "./channels/service.ts";
+import { classifyMcpTool, isSendTool, recipientsOf } from "./effect.ts";
 import { isSenderChannel, SENDER_CHANNELS, SENDERS_PAGE, type SenderChannel, SenderStore, senderScopeId } from "./senders.ts";
 import { CatalogCallError } from "./sources/catalog/http.ts";
 import { CatalogError, CatalogSource } from "./sources/catalog/source.ts";
@@ -25,7 +26,7 @@ import { ComposioSource, connectMode } from "./sources/composio/source.ts";
 import { McpError } from "./sources/mcp/client.ts";
 import { OAuthError } from "./sources/mcp/oauth.ts";
 import { McpSource } from "./sources/mcp/source.ts";
-import { ACCOUNT_ARGUMENT, ToolRegistry } from "./tools.ts";
+import { ACCOUNT_ARGUMENT, FIRST_CONTACT_SUFFIX, ToolRegistry } from "./tools.ts";
 import { type FetchLike, UpstreamError } from "./util/http.ts";
 import { newId } from "./util/ids.ts";
 import { NetPolicyError } from "./util/net-policy.ts";
@@ -378,7 +379,12 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     async call(tool, args, ctx): Promise<Json> {
       return guard(async () => {
         const s = services(ctx);
-        const row = s.tools.get(tool) ?? fail("tool_unknown", `Unknown tool ${tool}. Search first.`, 404);
+        // X-02: `<tool>__first_contact` = the same send tool, resolved with hold family first_contact (owner approved it).
+        const firstContact = tool.endsWith(FIRST_CONTACT_SUFFIX);
+        const baseName = firstContact ? tool.slice(0, -FIRST_CONTACT_SUFFIX.length) : tool;
+        const row = s.tools.get(baseName) ?? fail("tool_unknown", `Unknown tool ${tool}. Search first.`, 404);
+        const send = isSendTool(row);
+        if (firstContact && !send) fail("tool_unknown", `Unknown tool ${tool}. Only send tools have a first-contact form.`, 404);
         const { [ACCOUNT_ARGUMENT]: selector, ...upstreamArgs } = args;
         const usable = await usableAccounts(ctx, s, row.service, row.crud);
         let account: Account | undefined;
@@ -396,13 +402,29 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           fail("account_ambiguous", `Pick one account with "${ACCOUNT_ARGUMENT}": ${usable.map((a) => a.label).join(", ")}.`, 409);
         }
         if (!account) return fail("scope_denied", "No usable account.", 403);
-        ctx.receipt.summary(`${row.title} via ${account.label}`.slice(0, 280));
+        const recipients = send ? recipientsOf(upstreamArgs) : [];
+        if (send && !firstContact) {
+          const caller = ctx.caller.id;
+          const accountId = account.id;
+          const unknown = recipients.filter((r) => !ctx.db.prepare("SELECT 1 FROM connect_tool_contacts WHERE caller = ? AND account = ? AND address = ?").get(caller, accountId, r));
+          if (recipients.length === 0 || unknown.length > 0) {
+            const firstName = `${row.name}${FIRST_CONTACT_SUFFIX}`;
+            const who = recipients.length === 0 ? "Connect cannot see the recipients of this call" : `${unknown.slice(0, 5).join(", ")}${unknown.length > 5 ? ` and ${unknown.length - 5} more` : ""} ${unknown.length === 1 ? "is" : "are"} new to you on ${account.label}`;
+            fail("first_contact_required", `${who}. Call the tool ${firstName} with the same arguments; the owner approves this first contact once. Later messages to known people use ${row.name}.`, 409, {
+              retryable: false,
+              tool: firstName,
+              recipients: unknown.slice(0, 20),
+            });
+          }
+        }
+        ctx.receipt.summary(`${row.title} via ${account.label}${firstContact ? " (first contact)" : ""}`.slice(0, 280));
         ctx.receipt.meta({ subjectKind: account.kind, tool: row.upstream, service: row.service, account: account.label });
         let data: unknown;
         if (row.source === "composio") data = await s.composio.execute(account, row.upstream, upstreamArgs, workspace(ctx));
         else if (row.source === "catalog") data = await s.catalog.execute(account, row.name, upstreamArgs);
         else if (row.source === "mcp") data = await s.mcp.execute(account, row.upstream, upstreamArgs);
         else fail("source_not_ready", `${row.source} tools are not available yet.`, 501);
+        if (send) rememberToolContacts(ctx.db, ctx.caller.id, account.id, recipients);
         return { account: account.label, untrusted: true, data: (data ?? null) as Json };
       });
     },
@@ -532,6 +554,8 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(channel)) fail("buzz_channel_invalid", "channel must be a Buzz channel id.");
         if (!content) fail("buzz_content_invalid", "The message is empty.");
         if (!Number.isFinite(sendAt) || sendAt < Date.now() + 30_000 || sendAt > Date.now() + 30 * 86_400_000) fail("buzz_send_at_invalid", "sendAt must be an ISO time between 30 seconds and 30 days from now.");
+        const waiting = Number(ctx.db.prepare("SELECT COUNT(*) AS n FROM connect_buzz_scheduled WHERE agent = ? AND status = 'scheduled'").get(agent)?.n ?? 0);
+        if (waiting >= MAX_SCHEDULED_PER_AGENT) fail("buzz_schedule_limit", `You already have ${MAX_SCHEDULED_PER_AGENT} scheduled posts waiting. Cancel one first.`, 409);
         const narrow = relaysArg(i.relays).relays;
         const relays = s.buzz.relaysFor(agent, narrow);
         const id = newId("bsp");
@@ -932,6 +956,42 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         return { service, tools };
       });
     },
+    // X-03: the owner sees each MCP tool's class; a tool the server calls read-only is a write until the owner confirms it.
+    async mcp_tools_list(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const service = str(asInput(input).service) ?? fail("service_required", "Pick a service.");
+        const tools = s.tools.listService("mcp", service).map((t) => ({
+          name: t.name,
+          title: t.title,
+          effect: t.effect,
+          holdFamily: t.holdFamily ?? null,
+          // the server claims read-only but Connect classes it higher (or the owner already confirmed that claim)
+          unverifiedReadClaim: t.readClaim === true,
+          ownerConfirmedRead: ownerReadOf(ctx.db, t.name),
+        }));
+        return { service, tools } as unknown as Json;
+      });
+    },
+    async mcp_tool_read_set(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const i = asInput(input);
+        const name = str(i.name) ?? fail("tool_required", "Pick a tool.");
+        const row = s.tools.get(name);
+        if (row?.source !== "mcp") fail("tool_unknown", "No MCP tool with that name is connected.", 404);
+        const tool = row as NonNullable<typeof row>;
+        const confirmed = ownerReadOf(ctx.db, name);
+        if (i.read === true && !tool.readClaim && !confirmed) fail("tool_not_read_only", "The server does not say this tool is read-only, so it cannot be marked read.", 409);
+        if (i.read === true) ctx.db.prepare("INSERT INTO connect_tool_owner_reads (name, set_at) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET set_at = excluded.set_at").run(name, Date.now());
+        else ctx.db.prepare("DELETE FROM connect_tool_owner_reads WHERE name = ?").run(name);
+        // Re-class at once from the stored facts: owner read → read; withdrawn → the name inference (server hint not trusted).
+        const cls = classifyMcpTool(tool.upstream, i.read === true ? { readOnlyHint: true } : undefined, i.read === true);
+        s.tools.setClass(name, cls);
+        if (i.read !== true) ctx.db.prepare("UPDATE connect_tools SET read_claim = 1 WHERE name = ? AND effect != 'read'").run(name);
+        return { name, effect: cls.effect, ownerConfirmedRead: i.read === true };
+      });
+    },
     async buzz_identities_list(_input, ctx) {
       const s = services(ctx);
       const byAgent = new Map(s.buzz.list().map((i) => [i.agent, i]));
@@ -964,7 +1024,10 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         const s = services(ctx);
         const id = str(asInput(input).agent) ?? fail("agent_required", "Pick an agent.");
         const agent = agentsOf(ctx.db).find((a) => a.id === id) ?? fail("agent_unknown", "Unknown agent.", 404);
-        return { identity: await s.buzz.rotate(agent) };
+        const identity = await s.buzz.rotate(agent);
+        // CON-01: posts scheduled under the old key never go out under the new one.
+        cancelScheduled(ctx.db, agent.id, "Not sent: the owner rotated this agent's Buzz key.");
+        return { identity };
       });
     },
     async buzz_profile_publish(input, ctx) {
@@ -1107,14 +1170,20 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     // agent names for Buzz identities and the "as itself" picker (BSA-15: recorded as app data until the SDK exposes them).
     events: {
       async agentAdded(agent, ctx) {
-        ctx.db
-          .prepare("INSERT INTO connect_agents (id, name, updated_at) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at")
-          .run(agent.id, agent.name.slice(0, 80), Date.now());
+        upsertAgent(ctx.db, agent);
         await tetherBuzz(ctx.db, ctx.log);
       },
       async agentRemoved(agent, ctx) {
-        ctx.db.prepare("DELETE FROM connect_agents WHERE id = ?").run(agent.id);
-        ctx.db.prepare("DELETE FROM connect_buzz_agent_relays WHERE agent = ?").run(agent.id);
+        forgetAgent(ctx.db, agent.id);
+      },
+      // CON-01: the full slice agent list (boot, add, remove, pause/resume). Keeps each agent's status for the send-time
+      // check of scheduled posts, and forgets agents that left the slice while Connect was not running.
+      async agentsChanged(agents, ctx) {
+        ctx.db.transaction(() => {
+          for (const agent of agents) upsertAgent(ctx.db, agent);
+          const listed = new Set(agents.map((a) => a.id as string));
+          for (const row of ctx.db.prepare("SELECT id FROM connect_agents").all()) if (!listed.has(String(row.id))) forgetAgent(ctx.db, String(row.id));
+        });
       },
     },
   };
@@ -1156,26 +1225,79 @@ function ownBuzzMessage(db: Db, agent: string, eventId: string, fail: (code: str
   }
 }
 
-/** Post due scheduled Buzz messages (authorised and receipted when they were scheduled). */
+/** A scheduled post can wait at most this many per agent (CON-01: an injected agent cannot queue without bound). */
+export const MAX_SCHEDULED_PER_AGENT = 50;
+/** A post still `sending` after this long was cut by a restart: reported failed, never re-sent (no double post, L7). */
+export const SENDING_STALE_MS = 10 * 60_000;
+
+function upsertAgent(db: Db, agent: { id: string; name: string; status?: string }): void {
+  const status = agent.status === "paused" ? "paused" : "active";
+  db.prepare("INSERT INTO connect_agents (id, name, status, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET name = excluded.name, status = excluded.status, updated_at = excluded.updated_at").run(
+    agent.id,
+    agent.name.slice(0, 80),
+    status,
+    Date.now(),
+  );
+}
+
+/** The agent left Connect's slice (removed, or its edge to Connect revoked): forget it and cancel what it scheduled. */
+function forgetAgent(db: Db, agent: string): void {
+  db.prepare("DELETE FROM connect_agents WHERE id = ?").run(agent);
+  db.prepare("DELETE FROM connect_buzz_agent_relays WHERE agent = ?").run(agent);
+  cancelScheduled(db, agent, "Not sent: the agent was removed from Connect.");
+}
+
+function cancelScheduled(db: Db, agent: string, detail: string): number {
+  return db.prepare("UPDATE connect_buzz_scheduled SET status = 'cancelled', detail = ? WHERE agent = ? AND status = 'scheduled'").run(detail, agent).changes;
+}
+
+/**
+ * Post due scheduled Buzz messages. CON-01: the post was authorised when it was scheduled, so at send time Connect checks
+ * again what it can see in the slice: the agent must still be in Connect's slice and not paused. The workspace kill switch
+ * and connection revocations are not visible to app timers in SDK 0.1.18 (REQUESTS `## connect: send-time pause read`).
+ * Claim = `sending` + claimed_at, then `sent` or `failed`; a stale `sending` row is reported failed, never re-sent.
+ */
 export async function runDueBuzzPosts(db: Db, relay: BuzzRelay, log: Logger, now = Date.now()): Promise<number> {
+  const stale = db
+    .prepare("UPDATE connect_buzz_scheduled SET status = 'failed', detail = ? WHERE status = 'sending' AND claimed_at <= ?")
+    .run("Interrupted: Connect restarted while sending. The post may not have gone out; check the channel and schedule it again.", now - SENDING_STALE_MS);
+  if (stale.changes > 0) log.warn("scheduled buzz posts interrupted", { count: String(stale.changes) });
   const due = db.prepare("SELECT id, agent, channel, content, relays FROM connect_buzz_scheduled WHERE status = 'scheduled' AND send_at <= ? ORDER BY send_at LIMIT 20").all(now);
   let sent = 0;
   for (const r of due) {
-    const claim = db.prepare("UPDATE connect_buzz_scheduled SET status = 'sent' WHERE id = ? AND status = 'scheduled'").run(String(r.id));
+    const id = String(r.id);
+    const agentRow = db.prepare("SELECT status FROM connect_agents WHERE id = ?").get(String(r.agent));
+    const refusal = !agentRow ? "Not sent: the agent is no longer connected to Connect." : agentRow.status !== "active" ? "Not sent: the agent was paused when the post was due." : null;
+    if (refusal) {
+      db.prepare("UPDATE connect_buzz_scheduled SET status = 'cancelled', detail = ? WHERE id = ? AND status = 'scheduled'").run(refusal, id);
+      log.warn("scheduled buzz post not sent", { agent: String(r.agent), reason: agentRow ? "paused" : "removed" });
+      continue;
+    }
+    const claim = db.prepare("UPDATE connect_buzz_scheduled SET status = 'sending', claimed_at = ? WHERE id = ? AND status = 'scheduled'").run(now, id);
     if (claim.changes === 0) continue;
     try {
       const narrow = r.relays === null || r.relays === undefined ? undefined : (JSON.parse(String(r.relays)) as string[]);
       const out = await relay.post(String(r.agent), { channel: String(r.channel), content: String(r.content), ...(narrow ? { relays: narrow } : {}) });
       const failedOn = out.relays.filter((o) => !o.ok).map((o) => `${o.relay} (${o.ok ? "" : o.error})`);
-      db.prepare("UPDATE connect_buzz_scheduled SET event_id = ?, detail = ? WHERE id = ?").run(out.id, failedOn.length ? `Sent; failed on ${failedOn.join(", ")}`.slice(0, 300) : "", String(r.id));
+      db.prepare("UPDATE connect_buzz_scheduled SET status = 'sent', event_id = ?, detail = ? WHERE id = ?").run(out.id, failedOn.length ? `Sent; failed on ${failedOn.join(", ")}`.slice(0, 300) : "", id);
       rememberBuzzSent(db, String(r.agent), out.id, String(r.channel));
       sent += 1;
     } catch (error) {
-      db.prepare("UPDATE connect_buzz_scheduled SET status = 'failed', detail = ? WHERE id = ?").run(error instanceof Error ? error.message.slice(0, 300) : "failed", String(r.id));
+      db.prepare("UPDATE connect_buzz_scheduled SET status = 'failed', detail = ? WHERE id = ?").run(error instanceof Error ? error.message.slice(0, 300) : "failed", id);
       log.warn("scheduled buzz post failed", { code: (error as { code?: string }).code ?? "error" });
     }
   }
   return sent;
+}
+
+function ownerReadOf(db: Db, name: string): boolean {
+  return !!db.prepare("SELECT 1 FROM connect_tool_owner_reads WHERE name = ?").get(name);
+}
+
+/** X-02: the recipients of a send that ran are known to this caller on this account from now on. */
+function rememberToolContacts(db: Db, caller: string, account: string, recipients: readonly string[]): void {
+  const insert = db.prepare("INSERT OR IGNORE INTO connect_tool_contacts (caller, account, address, first_sent_at) VALUES (?, ?, ?, ?)");
+  for (const r of recipients) insert.run(caller, account, r, Date.now());
 }
 
 function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {

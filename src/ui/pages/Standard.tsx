@@ -7,7 +7,7 @@ import { Button, Tag } from "@opt2-tealbrick/ui";
 import { useEffect, useRef, useState } from "react";
 
 import { Notice } from "../components.tsx";
-import { errorText, useLoad } from "../hooks.ts";
+import { decideOrError, errorText, useLoad } from "../hooks.ts";
 import { callOp, tbFetch } from "../sdk.ts";
 
 type ReceiptRow = { id: string; caller: { name: string }; op: string; effect: string; status: string; summary: string; createdAt: number };
@@ -29,13 +29,8 @@ export function Holds({ focusId }: { focusId?: string | undefined }) {
   const act = async (id: string, decision: "approve" | "deny") => {
     setBusy(id);
     setError(null);
-    try {
-      await decide(id as Parameters<typeof decide>[0], decision);
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(null);
-    }
+    setError(await decideOrError(decide, id, decision));
+    setBusy(null);
   };
   return (
     <section aria-labelledby="holds-title">

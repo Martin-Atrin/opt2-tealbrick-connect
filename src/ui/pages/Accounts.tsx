@@ -12,6 +12,9 @@ import {
   accountUpdate,
   agentsList,
   catalogAccountTest,
+  type McpToolRow,
+  mcpToolReadSet,
+  mcpToolsList,
   scopesSet,
   toolsRefresh,
 } from "../ops.ts";
@@ -78,6 +81,7 @@ export function Accounts() {
             <h3 id={`svc-${service}`}>{service}</h3>
             {list.some((a) => a.status === "connected") ? <RefreshTools service={service} /> : null}
           </div>
+          {list.some((a) => a.source === "mcp" && a.status === "connected") ? <McpTools service={service} /> : null}
           <ul className="stack">
             {list.map((account) => (
               <li key={account.id} className="card">
@@ -106,6 +110,60 @@ export function Accounts() {
         onConfirm={() => void disconnect()}
         onCancel={() => setConfirm(null)}
       />
+    </div>
+  );
+}
+
+const EFFECT_TEXT: Record<string, string> = {
+  read: "reads only",
+  write: "changes data",
+  outward: "sends or publishes",
+  destructive: "deletes",
+  money: "moves money",
+};
+
+/**
+ * X-03: an MCP server can only CLAIM that a tool is read-only. Connect treats such a tool by its name (usually a write)
+ * until the owner confirms the claim here. Only tools with an unverified claim can be confirmed.
+ */
+function McpTools({ service }: { service: string }) {
+  const tools = useLoad(() => mcpToolsList(service), service);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const claimed = (tools.data?.tools ?? []).filter((t) => t.unverifiedReadClaim);
+  const set = async (tool: McpToolRow, read: boolean) => {
+    setBusy(tool.name);
+    setError(null);
+    try {
+      await mcpToolReadSet(tool.name, read);
+      await tools.reload();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  if (tools.error) return <Notice tone="error">Tools could not be loaded: {tools.error}</Notice>;
+  if (claimed.length === 0) return null;
+  return (
+    <div className="card">
+      <p>
+        <strong>Read-only claims to check.</strong> The server says these tools only read. Connect does not trust that claim. Confirm a tool only when you know it
+        reads only. A READ agent can then call it.
+      </p>
+      {error ? <Notice tone="error">{error}</Notice> : null}
+      <ul className="stack">
+        {claimed.map((t) => (
+          <li key={t.name} className="row">
+            <span>
+              {t.title} <span className="muted">({t.ownerConfirmedRead ? "you confirmed: reads only" : `treated as: ${EFFECT_TEXT[t.effect] ?? t.effect}`})</span>
+            </span>
+            <Button type="button" variant="secondary" disabled={busy === t.name} onClick={() => void set(t, !t.ownerConfirmedRead)} aria-label={`${t.ownerConfirmedRead ? "Withdraw" : "Confirm"} read-only for ${t.title}`}>
+              {t.ownerConfirmedRead ? "Withdraw" : "Confirm read-only"}
+            </Button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

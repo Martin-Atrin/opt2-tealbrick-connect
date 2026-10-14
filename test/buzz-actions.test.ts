@@ -74,3 +74,94 @@ test("schedule: validated time, listed, cancelled, due posts sent once by the sc
   const sentId = list.posts.find((p) => p.id === a.id)?.eventId ?? "";
   await handlerOf(s.app, "buzz_edit")({ channel: CHANNEL, messageId: sentId, content: "edited" }, s.ctx);
 });
+
+// ── CON-01: scheduled posts are checked again when they are due ──
+
+const schedule = (s: Awaited<ReturnType<typeof setup>>, content: string, inMs = 60_000) =>
+  handlerOf(s.app, "buzz_schedule")({ channel: CHANNEL, content, sendAt: new Date(Date.now() + inMs).toISOString() }, s.ctx) as Promise<{ id: string }>;
+const statusOf = (s: Awaited<ReturnType<typeof setup>>, id: string) => {
+  const row = s.db.prepare("SELECT status, detail FROM connect_buzz_scheduled WHERE id = ?").get(id);
+  return { status: String(row?.status), detail: String(row?.detail) };
+};
+const relayFor = (s: Awaited<ReturnType<typeof setup>>, impl = s.relay.impl) =>
+  new BuzzRelay(new BuzzIdentities({ db: s.db, secrets: secretsFor(s.db), relayUrls: RELAY, allowRelayOrigins: ORIGINS }), impl);
+const agentEntry = (status: "active" | "paused") => ({ id: AGENT as `agt_${string}`, name: "A", mode: "free" as const, status });
+
+test("CON-01 quiet: an active agent's due post is sent once, through a `sending` claim", async () => {
+  const s = await setup();
+  const a = await schedule(s, "on time");
+  let seenWhileSending: string | null = null;
+  const relay = relayFor(s, async (input, init) => {
+    seenWhileSending = statusOf(s, a.id).status;
+    return s.relay.impl(input, init);
+  });
+  const before = s.events.length;
+  assert.equal(await runDueBuzzPosts(s.db, relay, s.ctx.log, Date.now() + 61_000), 1);
+  assert.equal(seenWhileSending, "sending", "the row is `sending` (not `sent`) while the relay call runs");
+  assert.equal(statusOf(s, a.id).status, "sent");
+  assert.equal(s.events.length, before + 1);
+});
+
+test("CON-01 fires: a post of an agent paused after scheduling is not sent", async () => {
+  const s = await setup();
+  const a = await schedule(s, "after pause");
+  await s.app.events?.agentsChanged?.([agentEntry("paused")], eventCtx(s.db));
+  const before = s.events.length;
+  assert.equal(await runDueBuzzPosts(s.db, relayFor(s), s.ctx.log, Date.now() + 61_000), 0);
+  assert.equal(s.events.length, before, "nothing reached the relay");
+  assert.deepEqual(statusOf(s, a.id), { status: "cancelled", detail: "Not sent: the agent was paused when the post was due." });
+  // resumed later: a new post goes out again (the alarm is not stuck on)
+  await s.app.events?.agentsChanged?.([agentEntry("active")], eventCtx(s.db));
+  const b = await schedule(s, "after resume");
+  assert.equal(await runDueBuzzPosts(s.db, relayFor(s), s.ctx.log, Date.now() + 61_000), 1);
+  assert.equal(statusOf(s, b.id).status, "sent");
+});
+
+test("CON-01 fires: agentRemoved (or an edge revoke, or leaving the slice while down) cancels the agent's scheduled posts", async () => {
+  const s = await setup();
+  const a = await schedule(s, "removed");
+  await s.app.events?.agentRemoved?.(agentEntry("active"), eventCtx(s.db));
+  assert.deepEqual(statusOf(s, a.id), { status: "cancelled", detail: "Not sent: the agent was removed from Connect." });
+
+  const t = await setup();
+  const b = await schedule(t, "left the slice");
+  await t.app.events?.agentsChanged?.([], eventCtx(t.db));
+  assert.equal(statusOf(t, b.id).status, "cancelled");
+  assert.equal(await runDueBuzzPosts(t.db, relayFor(t), t.ctx.log, Date.now() + 61_000), 0);
+
+  // a row whose agent vanished without any event is still refused at send time
+  const u = await setup();
+  const c = await schedule(u, "no agent row");
+  u.db.prepare("DELETE FROM connect_agents").run();
+  assert.equal(await runDueBuzzPosts(u.db, relayFor(u), u.ctx.log, Date.now() + 61_000), 0);
+  assert.equal(statusOf(u, c.id).detail, "Not sent: the agent is no longer connected to Connect.");
+});
+
+test("CON-01 fires: a key rotation cancels waiting posts; a crash mid-send is reported failed, never `sent` or re-sent", async () => {
+  const s = await setup();
+  const a = await schedule(s, "old key");
+  await handlerOf(s.app, "buzz_identity_rotate")({ agent: AGENT }, testCtx({ db: s.db, person: true }));
+  assert.equal(statusOf(s, a.id).status, "cancelled");
+
+  const b = await schedule(s, "crash");
+  // simulate a process that claimed the row and died before the relay answered
+  s.db.prepare("UPDATE connect_buzz_scheduled SET status = 'sending', claimed_at = ? WHERE id = ?").run(Date.now() - 11 * 60_000, b.id);
+  const before = s.events.length;
+  assert.equal(await runDueBuzzPosts(s.db, relayFor(s), s.ctx.log, Date.now() + 61_000), 0);
+  assert.equal(statusOf(s, b.id).status, "failed");
+  assert.match(statusOf(s, b.id).detail, /may not have gone out/u);
+  assert.equal(s.events.length, before, "not re-sent");
+  // a fresh `sending` row (another tick still posting) is left alone
+  const c = await schedule(s, "in flight");
+  s.db.prepare("UPDATE connect_buzz_scheduled SET status = 'sending', claimed_at = ? WHERE id = ?").run(Date.now(), c.id);
+  await runDueBuzzPosts(s.db, relayFor(s), s.ctx.log, Date.now() + 61_000);
+  assert.equal(statusOf(s, c.id).status, "sending");
+});
+
+test("CON-01: at most 50 waiting scheduled posts per agent", async () => {
+  const s = await setup();
+  for (let n = 0; n < 50; n++) s.db.prepare("INSERT INTO connect_buzz_scheduled (id, agent, channel, content, send_at, status, created_at) VALUES (?, ?, ?, 'x', ?, 'scheduled', ?)").run(`bsp_${n}`, AGENT, CHANNEL, Date.now() + 3_600_000, Date.now());
+  await assert.rejects(schedule(s, "one too many"), (e: ConnectError) => e.code === "buzz_schedule_limit");
+  await handlerOf(s.app, "buzz_schedule_cancel")({ id: "bsp_0" }, s.ctx);
+  await schedule(s, "fits again");
+});

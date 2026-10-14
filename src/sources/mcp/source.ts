@@ -8,7 +8,7 @@ import type { AppSecrets } from "@opt2-tealbrick/miniapp-sdk";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
 
 import type { Account, AccountStore } from "../../accounts.ts";
-import { classifyMcpTool } from "../../effect.ts";
+import { classifyMcpTool, mcpReadClaimUnverified } from "../../effect.ts";
 import { entrySchema, type ToolRegistry, toolName } from "../../tools.ts";
 import type { FetchLike } from "../../util/http.ts";
 import { sha256Hex } from "../../util/ids.ts";
@@ -184,17 +184,24 @@ export class McpSource {
   }
 
   #register(service: string, tools: Awaited<ReturnType<McpClient["listTools"]>>): number {
+    // X-03: a server's readOnlyHint is believed only for tools the owner confirmed as read in Connect.
+    const ownerRead = new Set(this.#d.db.prepare("SELECT name FROM connect_tool_owner_reads").all().map((r) => String(r.name)));
     return this.#d.tools.replaceService(
       "mcp",
       service,
-      tools.map((t) => ({
-        name: toolName(`${service}_${t.name}`),
-        upstream: t.name,
-        title: (t.title ?? t.name).slice(0, 200),
-        description: t.description ?? t.name,
-        inputSchema: entrySchema(t.inputSchema),
-        ...classifyMcpTool(t.name, t.annotations),
-      })),
+      tools.map((t) => {
+        const name = toolName(`${service}_${t.name}`);
+        const readClaim = mcpReadClaimUnverified(t.name, t.annotations);
+        return {
+          name,
+          upstream: t.name,
+          title: (t.title ?? t.name).slice(0, 200),
+          description: t.description ?? t.name,
+          inputSchema: entrySchema(t.inputSchema),
+          ...classifyMcpTool(t.name, t.annotations, readClaim && ownerRead.has(name)),
+          ...(readClaim ? { readClaim: true } : {}),
+        };
+      }),
     );
   }
 

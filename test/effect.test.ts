@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ACCESS_CRUD, classify, classifyMcpTool, inferFromName, levelAllows, levelFor } from "../src/effect.ts";
+import { ACCESS_CRUD, classify, classifyMcpTool, inferFromName, isSendTool, levelAllows, levelFor, mcpReadClaimUnverified, recipientsOf } from "../src/effect.ts";
 import { classifyComposioTool, loadPolicies } from "../src/sources/composio/policy.ts";
 
 test("classify obeys M-OP-2/3/4", () => {
@@ -31,8 +31,10 @@ test("name inference is conservative", () => {
   assert.equal(inferFromName("NOTION_GET_PAGE").effect, "read");
 });
 
-test("MCP annotations win over the name", () => {
-  assert.equal(classifyMcpTool("delete_everything", { readOnlyHint: true }).effect, "read");
+test("MCP annotations only raise the class (X-03): readOnlyHint never lowers a write", () => {
+  assert.equal(classifyMcpTool("delete_everything", { readOnlyHint: true }).effect, "destructive");
+  assert.equal(classifyMcpTool("send_email", { readOnlyHint: true }).effect, "outward");
+  assert.equal(classifyMcpTool("get_issue", { readOnlyHint: true }).effect, "read", "a hint that agrees with the name stays read");
   assert.equal(classifyMcpTool("lookup", { destructiveHint: true }).effect, "destructive");
   assert.equal(classifyMcpTool("lookup", { readOnlyHint: false, openWorldHint: true }).effect, "outward");
 });
@@ -79,7 +81,8 @@ test("SEC-02: Composio without a policy fails closed; a policy never downgrades 
   assert.equal(classifyComposioTool("GMAIL_PAY_INVOICE", loadPolicies().get("gmail")).effect, "money");
   assert.equal(classifyMcpTool("charge_card", { readOnlyHint: true }).effect, "money");
   assert.equal(classifyMcpTool("frobnicate", undefined).effect, "outward");
-  assert.equal(classifyMcpTool("frobnicate", { readOnlyHint: true }).effect, "read");
+  assert.equal(classifyMcpTool("frobnicate", { readOnlyHint: true }).effect, "outward", "X-03: an unverified read claim stays fail-closed");
+  assert.equal(classifyMcpTool("frobnicate", { readOnlyHint: true }, true).effect, "read", "X-03: the owner confirmed it as read");
 });
 
 test("C107: every outward or money class carries a hold family (resolve answers never lack one)", () => {
@@ -135,4 +138,62 @@ test("F84: Google Calendar policy: list/get reads (ACL, settings) stay reads; ev
     ["GOOGLECALENDAR_CREATE_EVENT", "outward"], ["GOOGLECALENDAR_REMOVE_ATTENDEE", "outward"], ["GOOGLECALENDAR_ACL_INSERT", "outward"],
     ["GOOGLECALENDAR_DELETE_EVENT", "destructive"], ["GOOGLECALENDAR_BATCH_EVENTS", "destructive"], ["GOOGLECALENDAR_SETTINGS_WATCH", "outward"],
   ] as const) assert.equal(classifyComposioTool(slug, cal).effect, effect, slug);
+});
+
+// ── security sprint 1 ──
+
+test("CON-02 fires: money and destructive names in camelCase, PascalCase, kebab and joined words keep their class", () => {
+  const money = ["createPayment", "refundCharge", "transferFunds", "createPaymentIntent", "CreateRefund", "stripe-create-refund", "issuePayout", "PAYMENTINTENT_CREATE", "capturePaymentIntent"];
+  for (const name of money) {
+    assert.equal(inferFromName(name).effect, "money", name);
+    assert.equal(classifyMcpTool(name, { readOnlyHint: true }).holdFamily, "money", name);
+  }
+  const destructive = ["deleteRepository", "dropTable", "purgeQueue", "DeleteAllRecords", "delete-branch", "truncateTable", "deleteall"];
+  for (const name of destructive) assert.equal(inferFromName(name).holdFamily, "destructive", name);
+});
+
+test("CON-02 fires on real Composio slugs from the catalog (composio search, 2026-10-14)", () => {
+  for (const slug of ["STRIPE_CREATE_REFUND", "STRIPE_CREATE_CHARGE_REFUND", "STRIPE_CREATE_TRANSFER", "STRIPE_CREATE_PAYMENT_LINK", "STRIPE_CREATE_CHECKOUT_SESSION", "QUICKBOOKS_CREATE_PAYMENT", "QUICKBOOKS_CREATE_ECHECK_PAYMENT"]) {
+    assert.equal(classifyComposioTool(slug, undefined).effect, "money", slug);
+  }
+  assert.equal(classifyComposioTool("GITHUB_DELETE_A_REPOSITORY", undefined).effect, "destructive");
+  const gmail = loadPolicies().get("gmail");
+  for (const slug of ["GMAIL_SEND_EMAIL", "GMAIL_REPLY_TO_THREAD", "GMAIL_FORWARD_MESSAGE", "GMAIL_SEND_DRAFT"]) assert.equal(classifyComposioTool(slug, gmail).effect, "outward", slug);
+});
+
+test("CON-02 stays quiet: reads and lookalike words are not money or destructive", () => {
+  const reads = ["getRepository", "listIssues", "searchMessages", "getDisplaySettings", "fetchTooltip", "GITHUB_GET_A_REPOSITORY", "GITHUB_FIND_REPOSITORIES", "STRIPE_RETRIEVE_BALANCE", "listDeletedItems", "get_payload"];
+  for (const name of reads) assert.equal(inferFromName(name).effect, "read", name);
+  assert.equal(inferFromName("updateDropboxFile").effect, "write", "dropbox is not drop");
+  assert.equal(classifyComposioTool("GMAIL_FETCH_EMAILS", loadPolicies().get("gmail")).effect, "read");
+});
+
+test("X-03: only an unverified read claim is offered to the owner; agreeing or money claims are not", () => {
+  assert.equal(mcpReadClaimUnverified("send_email", { readOnlyHint: true }), true);
+  assert.equal(mcpReadClaimUnverified("get_issue", { readOnlyHint: true }), false, "the name already says read");
+  assert.equal(mcpReadClaimUnverified("send_email", undefined), false, "no claim");
+  assert.equal(mcpReadClaimUnverified("createPayment", { readOnlyHint: true }), false, "money can never be confirmed read");
+  assert.equal(classifyMcpTool("createPayment", { readOnlyHint: true }, true).effect, "money", "an owner read mark never lowers money");
+});
+
+test("X-02: send tools and their recipients (real Composio argument names)", () => {
+  assert.equal(isSendTool({ name: "gmail_send_email", upstream: "GMAIL_SEND_EMAIL", effect: "outward" }), true);
+  assert.equal(isSendTool({ name: "gmail_forward_message", upstream: "GMAIL_FORWARD_MESSAGE", effect: "outward" }), true);
+  assert.equal(isSendTool({ name: "slack_sends_a_message", upstream: "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL", effect: "outward" }), true);
+  assert.equal(isSendTool({ name: "sendMessage", effect: "outward" }), true, "camelCase MCP send");
+  // quiet: outward tools that reach no person, and reads/writes
+  assert.equal(isSendTool({ name: "github_merge_pull_request", upstream: "GITHUB_MERGE_PULL_REQUEST", effect: "outward" }), false);
+  assert.equal(isSendTool({ name: "gmail_create_email_draft", upstream: "GMAIL_CREATE_EMAIL_DRAFT", effect: "write" }), false);
+  assert.equal(isSendTool({ name: "gmail_list_send_as", upstream: "GMAIL_LIST_SEND_AS", effect: "read" }), false);
+
+  assert.deepEqual(recipientsOf({ recipient_email: "Bob <BOB@x.example>", cc: ["c@x.example"], bcc: [], extra_recipients: ["d@x.example, e@x.example"], user_id: "me", subject: "hi" }), [
+    "bob@x.example",
+    "c@x.example",
+    "d@x.example",
+    "e@x.example",
+  ]);
+  assert.deepEqual(recipientsOf({ message_id: "m1", recipients: ["x@evil.example"], additional_text: "fyi" }), ["x@evil.example"], "GMAIL_FORWARD_MESSAGE");
+  assert.deepEqual(recipientsOf({ to: "o@x.example", cc_emails: ["p@x.example"], bcc_emails: ["q@x.example"] }), ["o@x.example", "p@x.example", "q@x.example"], "OUTLOOK_SEND_EMAIL");
+  assert.deepEqual(recipientsOf({ toRecipients: [{ emailAddress: { address: "g@x.example" } }] }), ["g@x.example"], "Graph style");
+  assert.deepEqual(recipientsOf({ draft_id: "r1", user_id: "me" }), [], "GMAIL_SEND_DRAFT names no recipient");
 });

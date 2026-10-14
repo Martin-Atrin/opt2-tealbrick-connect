@@ -35,9 +35,9 @@ export function effectRank(effect: Effect): number {
  * notifies people), `destructive` = deletes or irreversibly overwrites. Result obeys M-OP-2/3/4:
  * read ⇔ ["read"]; destructive ⇒ delete ∈ crud and holdFamily "destructive"; outward ⇒ holdFamily "outward" (C107: a
  * `resolve` answer with outward or money effect always carries a family; "outward" is not held by default, the owner can
- * turn it on). Dynamic tools never resolve as `first_contact`: `resolve` sees only the tool name, not the recipient, and
- * Connect keeps no correspondence history for third-party services, so it cannot prove a recipient is new. Connect's own
- * channels have explicit first-contact ops (buzz_dm_first, channel_dm_first).
+ * turn it on). X-02: `resolve` sees only the tool name, so a dynamic SEND tool to a new recipient works like Connect's own
+ * channels (buzz_dm / buzz_dm_first): `tools.call` refuses `first_contact_required` unless every recipient is in the caller's
+ * contact book for that account, and `<tool>__first_contact` resolves with hold family `first_contact` (held by default).
  */
 export function classify(facts: { write: boolean; outward: boolean; destructive: boolean; money?: boolean }): ToolClass {
   if (facts.money) return { crud: ["create", "update", "delete"], effect: "money", holdFamily: "money" };
@@ -81,9 +81,37 @@ const READ_PARTS = new Set([
   "preview", "download", "export", "stats", "status", "info", "check", "validate", "verify",
 ]);
 
-/** True when the name names money movement (always `money`: always held, CORE §7). */
+/**
+ * CON-02: the words of a tool name in every common style. camelCase / PascalCase (`createPayment`, `deleteRepository`),
+ * acronym runs (`HTTPRequest` → http, request), letter/digit borders, snake_case, kebab-case, dotted and spaced names all give
+ * the same lower-case words, so money and destructive names are matched the same way whatever the server's naming style.
+ */
+export function nameParts(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
+    .replace(/([A-Za-z])([0-9])/gu, "$1 $2")
+    .replace(/([0-9])([A-Za-z])/gu, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter(Boolean);
+}
+
+/**
+ * CON-02: long money and destructive stems also match INSIDE a word (`PAYMENTINTENT`, `paymentlinks`, `deleteall`): over-blocking
+ * is safe for these classes. Short words (pay, buy, tip, wire, drop, ...) match only as whole words ("display", "tooltip",
+ * "dropbox" stay out).
+ */
+const MONEY_STEMS = ["payment", "payout", "refund", "purchase", "checkout", "withdraw", "deposit", "transfer", "remittance", "charge"] as const;
+const DESTRUCTIVE_STEMS = ["delete", "purge", "destroy", "erase", "truncate"] as const;
+const hasStem = (parts: readonly string[], stems: readonly string[]) => parts.some((part) => stems.some((stem) => part.includes(stem)));
+/** Destructive stems skip past participles ("list_deleted_items" names deleted things, it does not delete). */
+const hasDestructiveStem = (parts: readonly string[]) => hasStem(parts.filter((part) => !part.endsWith("ed")), DESTRUCTIVE_STEMS);
+const isMoneyParts = (parts: readonly string[]) => parts.some((part) => MONEY_PARTS.has(part)) || hasStem(parts, MONEY_STEMS);
+
+/** True when the name names money movement (always `money`: always held, CORE §7). Any naming style (CON-02). */
 export function namesMoney(name: string): boolean {
-  return name.toLowerCase().split(/[^a-z0-9]+/u).some((part) => MONEY_PARTS.has(part));
+  return isMoneyParts(nameParts(name));
 }
 
 /**
@@ -101,12 +129,12 @@ const NOUN_PARTS = new Set(["draft", "label", "message", "email", "comment", "ta
  * F84: when the FIRST verb of the name is a read verb, the ambiguous noun words (NOUN_PARTS) are not counted as verbs.
  */
 export function inferFromName(name: string): ToolClass {
-  const all = name.toLowerCase().split(/[^a-z0-9]+/u).filter(Boolean);
-  if (all.some((part) => MONEY_PARTS.has(part))) return classify({ write: true, outward: true, destructive: false, money: true });
+  const all = nameParts(name);
+  if (isMoneyParts(all)) return classify({ write: true, outward: true, destructive: false, money: true });
   const isVerb = (part: string) => READ_PARTS.has(part) || DESTRUCTIVE_PARTS.has(part) || OUTWARD_PARTS.has(part) || WRITE_PARTS.has(part);
   const lead = all.find((part) => isVerb(part) && !NOUN_PARTS.has(part));
   const parts = lead !== undefined && READ_PARTS.has(lead) ? all.filter((part) => !NOUN_PARTS.has(part)) : all;
-  const destructive = parts.some((part) => DESTRUCTIVE_PARTS.has(part));
+  const destructive = parts.some((part) => DESTRUCTIVE_PARTS.has(part)) || hasDestructiveStem(parts);
   const outward = parts.some((part) => OUTWARD_PARTS.has(part));
   const write = parts.some((part) => WRITE_PARTS.has(part));
   if (destructive || outward || write) return classify({ write: true, outward, destructive });
@@ -114,14 +142,87 @@ export function inferFromName(name: string): ToolClass {
   return classify({ write: true, outward: true, destructive: false });
 }
 
-/** MCP tool annotations (readOnlyHint / destructiveHint), then fail-closed name inference; money words always win. */
-export function classifyMcpTool(name: string, annotations: Record<string, unknown> | undefined): ToolClass {
+/**
+ * MCP tool class. Money words always win. X-03: annotations come from an untrusted server, so they may only RAISE a class:
+ * `destructiveHint: true` → destructive; `readOnlyHint: false` → never read. `readOnlyHint: true` is believed only when the
+ * name inference also says read, or when the owner marked this tool read in Connect (`ownerRead`, op mcp_tool_read_set).
+ */
+export function classifyMcpTool(name: string, annotations: Record<string, unknown> | undefined, ownerRead = false): ToolClass {
   const a = annotations ?? {};
   if (namesMoney(name)) return classify({ write: true, outward: true, destructive: false, money: true });
-  if (a.readOnlyHint === true) return classify({ write: false, outward: false, destructive: false });
   if (a.destructiveHint === true) return classify({ write: true, outward: false, destructive: true });
+  if (ownerRead) return classify({ write: false, outward: false, destructive: false });
   const inferred = inferFromName(name);
   // The server says the tool is not read-only: never class it as read.
   if (a.readOnlyHint === false && inferred.effect === "read") return classify({ write: true, outward: a.openWorldHint !== false, destructive: false });
   return inferred;
+}
+
+/** X-03: the server claims read-only but Connect classes the tool higher; the owner can confirm it as read. */
+export function mcpReadClaimUnverified(name: string, annotations: Record<string, unknown> | undefined): boolean {
+  return annotations?.readOnlyHint === true && annotations.destructiveHint !== true && !namesMoney(name) && inferFromName(name).effect !== "read";
+}
+
+// ── X-02: first contact for dynamic send tools ──
+
+/** Verbs that make an outward tool a SEND to people (mail, DM, SMS, invites): only these need a known recipient. */
+const SEND_PARTS = new Set(["send", "sends", "reply", "replies", "forward", "forwards", "dm", "sms", "mms", "invite", "invites", "share", "shares", "notify", "broadcast", "tweet"]);
+
+/** True for an `outward` dynamic tool that sends to people: first contact applies (X-02, C107). */
+export function isSendTool(tool: { name: string; upstream?: string; effect: Effect }): boolean {
+  if (tool.effect !== "outward") return false;
+  return nameParts(tool.upstream ?? tool.name).some((part) => SEND_PARTS.has(part));
+}
+
+/**
+ * Argument names (lower case, `_`/`-` removed) that carry recipients, from the real Composio schemas (GMAIL_SEND_EMAIL
+ * recipient_email/cc/bcc/extra_recipients, GMAIL_FORWARD_MESSAGE recipients, OUTLOOK_SEND_EMAIL to/cc_emails/bcc_emails),
+ * Microsoft Graph (toRecipients) and common chat/SMS tools (channel, chat_id, phone_number).
+ */
+const RECIPIENT_KEYS = new Set([
+  "to", "cc", "bcc", "recipient", "recipients", "recipientemail", "recipientemails", "extrarecipients", "ccemails", "bccemails",
+  "toemail", "toemails", "toaddress", "toaddresses", "torecipients", "ccrecipients", "bccrecipients", "email", "emails",
+  "emailaddress", "emailaddresses", "attendees", "invitees", "phone", "phonenumber", "tonumber", "channel", "channelid", "chatid",
+  "conversationid", "userid", "username", "user",
+]);
+/** Values that name the sender itself, not a recipient (Composio `user_id: "me"`). */
+const SELF_VALUES = new Set(["me", "self"]);
+const MAX_RECIPIENTS = 100;
+
+/** One address in a stable form: `Name <a@b.c>` → `a@b.c`; lower case; trimmed. */
+function normaliseAddress(raw: string): string | null {
+  const angle = /<([^<>]+)>/u.exec(raw);
+  const v = (angle?.[1] ?? raw).trim().toLowerCase();
+  return v && v.length <= 320 && !SELF_VALUES.has(v) ? v : null;
+}
+
+function collect(value: unknown, out: Set<string>, depth: number): void {
+  if (out.size > MAX_RECIPIENTS || depth > 4 || value === null || value === undefined) return;
+  if (typeof value === "string") {
+    for (const piece of value.split(/[,;\n]+/u)) {
+      const a = normaliseAddress(piece);
+      if (a) out.add(a);
+    }
+  } else if (typeof value === "number") {
+    out.add(String(value));
+  } else if (Array.isArray(value)) {
+    for (const item of value) collect(item, out, depth + 1);
+  } else if (typeof value === "object") {
+    // Graph style { emailAddress: { address } } and { email | address | id | name }.
+    const o = value as Record<string, unknown>;
+    const inner = o.emailAddress ?? o.email ?? o.address ?? o.id ?? o.phone ?? o.number;
+    collect(inner, out, depth + 1);
+  }
+}
+
+/**
+ * The recipients a send tool names in its arguments (X-02). Only the top-level recipient argument names count; a send tool
+ * with none (GMAIL_SEND_DRAFT draft_id, a reply that names no address) gives [] and is treated as first contact (fail closed).
+ */
+export function recipientsOf(args: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  for (const [key, value] of Object.entries(args)) {
+    if (RECIPIENT_KEYS.has(key.toLowerCase().replace(/[^a-z0-9]/gu, ""))) collect(value, out, 0);
+  }
+  return [...out].sort().slice(0, MAX_RECIPIENTS + 1);
 }

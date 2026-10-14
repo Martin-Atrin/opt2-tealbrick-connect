@@ -68,6 +68,18 @@ export const accountUpdate = (id: string, label: string) => callOp<{ account: Ac
 export const accountDisconnect = (id: string) => callOp<{ account: Account }>("account_disconnect", { id });
 export const toolsRefresh = (service: string) => callOp<{ service: string; tools: Json }>("tools_refresh", { service });
 
+/** X-03: one MCP tool as the owner sees it. `unverifiedReadClaim` = the server says read-only, Connect classes it higher. */
+export interface McpToolRow {
+  name: string;
+  title: string;
+  effect: string;
+  holdFamily: string | null;
+  unverifiedReadClaim: boolean;
+  ownerConfirmedRead: boolean;
+}
+export const mcpToolsList = (service: string) => callOp<{ service: string; tools: McpToolRow[] }>("mcp_tools_list", { service });
+export const mcpToolReadSet = (name: string, read: boolean) => callOp<{ name: string; effect: string; ownerConfirmedRead: boolean }>("mcp_tool_read_set", { name, read });
+
 export const buzzIdentitiesList = () => callOp<{ relay: string | null; relays: string[]; relayProblems: string[]; agents: BuzzAgentRow[] }>("buzz_identities_list", {});
 export const buzzAgentRelaysSet = (agent: string, relays: string[] | null) => callOp<{ agent: string; relays: string[] | null }>("buzz_agent_relays_set", { agent, relays });
 export const buzzIdentitiesGenerate = () => callOp<{ created: BuzzIdentity[]; existing: BuzzIdentity[] }>("buzz_identities_generate", {});

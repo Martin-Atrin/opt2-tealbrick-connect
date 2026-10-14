@@ -6,11 +6,19 @@
 import type { CrudAction, DynamicCatalogEntry, DynamicResolution, Effect, HoldFamily, JsonSchemaObject } from "@opt2-tealbrick/spec/manifest";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
 
-import type { ToolClass } from "./effect.ts";
+import { isSendTool, type ToolClass } from "./effect.ts";
 import { sha256Hex } from "./util/ids.ts";
 
 export const TOOL_SOURCES = ["composio", "catalog", "mcp"] as const;
 export type ToolSource = (typeof TOOL_SOURCES)[number];
+
+/**
+ * X-02: `<tool>__first_contact` is the same send tool resolved with hold family `first_contact` (held by default, C105).
+ * `tools.call` refuses the plain tool with `first_contact_required` while a recipient is new to the caller on that account;
+ * the agent then calls this name with the same arguments and the owner approves the first contact once.
+ * Plain tool names never contain `__` (toolName collapses separators), so the suffix cannot clash with a real tool.
+ */
+export const FIRST_CONTACT_SUFFIX = "__first_contact";
 
 /** Argument every catalog entry carries so the agent can pick one of several accounts of the same service. */
 export const ACCOUNT_ARGUMENT = "connect_account";
@@ -25,6 +33,8 @@ export interface ToolRow extends ToolClass {
   title: string;
   description: string;
   inputSchema: JsonSchemaObject;
+  /** X-03: MCP only — the server claims read-only, Connect classes it higher (owner may confirm it with mcp_tool_read_set) */
+  readClaim?: boolean;
 }
 
 /** DynamicCatalogEntry.name from an upstream slug: lower snake case, ≤ 48 chars (hash suffix when shortened). */
@@ -74,6 +84,7 @@ function fromRow(row: Record<string, unknown>): ToolRow {
     crud: JSON.parse(String(row.crud)) as CrudAction[],
     effect: String(row.effect) as Effect,
     ...(row.hold_family ? { holdFamily: String(row.hold_family) as HoldFamily } : {}),
+    ...(Number(row.read_claim ?? 0) === 1 ? { readClaim: true } : {}),
   };
 }
 
@@ -101,20 +112,32 @@ export class ToolRegistry {
     return this.#db.transaction(() => {
       this.#db.prepare("DELETE FROM connect_tools WHERE source = ? AND service = ?").run(source, service);
       const insert = this.#db.prepare(
-        `INSERT INTO connect_tools (name, source, service, upstream, title, description, input_schema, crud, effect, hold_family, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO connect_tools (name, source, service, upstream, title, description, input_schema, crud, effect, hold_family, read_claim, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (name) DO UPDATE SET source = excluded.source, service = excluded.service, upstream = excluded.upstream,
            title = excluded.title, description = excluded.description, input_schema = excluded.input_schema, crud = excluded.crud,
-           effect = excluded.effect, hold_family = excluded.hold_family, updated_at = excluded.updated_at`,
+           effect = excluded.effect, hold_family = excluded.hold_family, read_claim = excluded.read_claim, updated_at = excluded.updated_at`,
       );
       for (const tool of tools) {
         insert.run(
           tool.name, source, service, tool.upstream, tool.title, tool.description, JSON.stringify(tool.inputSchema),
-          JSON.stringify(tool.crud), tool.effect, tool.holdFamily ?? null, now,
+          JSON.stringify(tool.crud), tool.effect, tool.holdFamily ?? null, tool.readClaim ? 1 : 0, now,
         );
       }
       return tools.length;
     });
+  }
+
+  /** Every tool of one (source, service), by name (owner views; X-03). */
+  listService(source: ToolSource, service: string): ToolRow[] {
+    return this.#db.prepare("SELECT * FROM connect_tools WHERE source = ? AND service = ? ORDER BY name").all(source, service).map(fromRow);
+  }
+
+  /** Overwrite the class of one tool (X-03: the owner confirmed an MCP tool as read, or withdrew that). */
+  setClass(name: string, cls: ToolClass, now = Date.now()): void {
+    this.#db
+      .prepare("UPDATE connect_tools SET crud = ?, effect = ?, hold_family = ?, updated_at = ? WHERE name = ?")
+      .run(JSON.stringify(cls.crud), cls.effect, cls.holdFamily ?? null, now, name);
   }
 
   removeService(source: ToolSource, service: string): void {
@@ -132,6 +155,11 @@ export class ToolRegistry {
   }
 
   resolve(name: string): DynamicResolution | null {
+    if (name.endsWith(FIRST_CONTACT_SUFFIX)) {
+      const base = this.get(name.slice(0, -FIRST_CONTACT_SUFFIX.length));
+      if (!base || !isSendTool(base)) return null;
+      return { tool: name, crud: base.crud, effect: base.effect, holdFamily: "first_contact" };
+    }
     const row = this.get(name);
     if (!row) return null;
     return { tool: row.name, crud: row.crud, effect: row.effect, ...(row.holdFamily ? { holdFamily: row.holdFamily } : {}) };
