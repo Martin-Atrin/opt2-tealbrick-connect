@@ -17,6 +17,7 @@ import { ChannelError, type ChannelNet, type ChannelProvider, type ChannelServic
 import { channelProviders } from "./channels/registry.ts";
 import { ChannelHub, isChannelService } from "./channels/service.ts";
 import { classifyMcpTool, isSendTool, recipientsOf } from "./effect.ts";
+import { gmailContentRead, holdSummary, mailFromArgs, mailFromGmail, renderHoldView } from "./hold-view.ts";
 import { isSenderChannel, SENDER_CHANNELS, SENDERS_PAGE, type SenderChannel, SenderStore, senderScopeId } from "./senders.ts";
 import { CatalogCallError } from "./sources/catalog/http.ts";
 import { CatalogError, CatalogSource } from "./sources/catalog/source.ts";
@@ -31,6 +32,7 @@ import { type FetchLike, UpstreamError } from "./util/http.ts";
 import { newId } from "./util/ids.ts";
 import { NetPolicyError } from "./util/net-policy.ts";
 import { pinnedFetch } from "./util/pinned-fetch.ts";
+import { scrubSecrets } from "./util/redact.ts";
 
 export const PRODUCT_SCOPE = "account";
 export const COMPOSIO_KEY = "COMPOSIO_API_KEY";
@@ -368,6 +370,26 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       ? `The workspace sender has not written to this person before. Call ${op} once (the owner approves first contact); later messages use the normal op.`
       : `You have not written to this person before. Use ${op}; the owner approves first contact.`;
 
+  /** The ONE account choice of a dynamic tool call (the call and its hold view use the same account). */
+  const pickAccount = async (ctx: OpContext, s: Services, row: { service: string; crud: readonly CrudAction[] }, selector: unknown): Promise<Account> => {
+    const usable = await usableAccounts(ctx, s, row.service, row.crud);
+    let account: Account | undefined;
+    const wanted = str(selector);
+    if (wanted) {
+      const all = s.accounts.list({ service: row.service, status: "connected" });
+      const match = all.find((a) => a.id === wanted) ?? all.find((a) => a.label.toLowerCase() === wanted.toLowerCase());
+      if (!match) fail("account_unknown", `No connected ${row.service} account named "${wanted}".`, 404);
+      account = usable.find((a) => a.id === match?.id) ?? fail("scope_denied", `Your access to "${match?.label}" does not allow this tool.`, 403);
+    } else if (usable.length === 1) {
+      account = usable[0];
+    } else if (usable.length === 0) {
+      fail("scope_denied", `You have no ${row.service} account with access for this tool. Ask the owner to raise your access in Connect.`, 403);
+    } else {
+      fail("account_ambiguous", `Pick one account with "${ACCOUNT_ARGUMENT}": ${usable.map((a) => a.label).join(", ")}.`, 409);
+    }
+    return account ?? fail("scope_denied", "No usable account.", 403);
+  };
+
   const dynamicTools: DynamicHandlers = {
     async catalog(query: DynamicSearchInput | null, ctx): Promise<DynamicCatalogEntry[]> {
       const s = services(ctx);
@@ -386,22 +408,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         const send = isSendTool(row);
         if (firstContact && !send) fail("tool_unknown", `Unknown tool ${tool}. Only send tools have a first-contact form.`, 404);
         const { [ACCOUNT_ARGUMENT]: selector, ...upstreamArgs } = args;
-        const usable = await usableAccounts(ctx, s, row.service, row.crud);
-        let account: Account | undefined;
-        const wanted = str(selector);
-        if (wanted) {
-          const all = s.accounts.list({ service: row.service, status: "connected" });
-          const match = all.find((a) => a.id === wanted) ?? all.find((a) => a.label.toLowerCase() === wanted.toLowerCase());
-          if (!match) fail("account_unknown", `No connected ${row.service} account named "${wanted}".`, 404);
-          account = usable.find((a) => a.id === match?.id) ?? fail("scope_denied", `Your access to "${match?.label}" does not allow this tool.`, 403);
-        } else if (usable.length === 1) {
-          account = usable[0];
-        } else if (usable.length === 0) {
-          fail("scope_denied", `You have no ${row.service} account with access for this tool. Ask the owner to raise your access in Connect.`, 403);
-        } else {
-          fail("account_ambiguous", `Pick one account with "${ACCOUNT_ARGUMENT}": ${usable.map((a) => a.label).join(", ")}.`, 409);
-        }
-        if (!account) return fail("scope_denied", "No usable account.", 403);
+        const account = await pickAccount(ctx, s, row, selector);
         const recipients = send ? recipientsOf(upstreamArgs) : [];
         if (send && !firstContact) {
           const caller = ctx.caller.id;
@@ -427,6 +434,39 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         if (send) rememberToolContacts(ctx.db, ctx.caller.id, account.id, recipients);
         return { account: account.label, untrusted: true, data: (data ?? null) as Json };
       });
+    },
+    /**
+     * SDK-HV-1 / QA R-1 (miniapp-sdk 0.1.23): the owner sees what a held SEND tool would send — recipients, subject, the first
+     * 500 characters as plain text, attachment names and sizes. A Gmail draft send (and a forward) READS the draft/message
+     * with the same account the call would use (read only; never sends, never renders HTML). Other tools: null (default view).
+     * A throw here (draft not found, upstream down) makes the SDK show the default view with "could not read"; the hold stays.
+     */
+    async holdView(tool, args, ctx) {
+      const s = services(ctx);
+      const firstContact = tool.endsWith(FIRST_CONTACT_SUFFIX);
+      const row = s.tools.get(firstContact ? tool.slice(0, -FIRST_CONTACT_SUFFIX.length) : tool);
+      if (!row || !isSendTool(row)) return null;
+      const { [ACCOUNT_ARGUMENT]: selector, ...upstreamArgs } = args;
+      const account = await pickAccount(ctx, s, row, selector);
+      const heading = `${row.title} (${row.service})${firstContact ? ", first contact" : ""}`;
+      let mail = mailFromArgs(upstreamArgs);
+      const notes: string[] = [];
+      const read = row.source === "composio" ? gmailContentRead(row.upstream, upstreamArgs) : null;
+      if (read) {
+        const data = await s.composio.execute(account, read.slug, read.args, workspace(ctx));
+        const found = mailFromGmail(data) ?? fail("hold_view_unreadable", "The draft or message has no readable content.", 502);
+        if (read.kind === "draft") {
+          mail = found;
+          notes.push(`Draft: ${String(upstreamArgs.draft_id)} (content read from the mailbox now; a later change to the draft needs a new approval)`);
+        } else {
+          // forward: the recipients come from the arguments, the content from the forwarded message
+          mail = { ...found, to: mail.to, cc: mail.cc, bcc: mail.bcc, text: [mail.text, found.text].filter((t) => t).join("\n\n---------- Forwarded message ----------\n") || null };
+          notes.push(`Forwards message ${String(upstreamArgs.message_id)} (read from the mailbox now)`);
+        }
+      }
+      const key = row.source === "composio" ? await ctx.getKey(COMPOSIO_KEY) : null;
+      const scrub = (t: string) => (key ? scrubSecrets(t, [key]) : t);
+      return { summary: scrub(holdSummary(heading, mail)), view: scrub(renderHoldView({ heading, account: account.label, mail, notes })) };
     },
   };
 

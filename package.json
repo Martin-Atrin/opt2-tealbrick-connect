@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/connect",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "private": true,
   "description": "Teal Brick Connect miniapp: Composio, MCP connectors, Tealbrick catalog, Channels. Built on the Miniapp SDK.",
   "license": "Apache-2.0",
@@ -22,8 +22,8 @@
     "@noble/curves": "2.4.0",
     "@noble/hashes": "2.4.0",
     "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.18/opt2-tealbrick-manifest-0.1.18.tgz",
-    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.22/opt2-tealbrick-miniapp-sdk-0.1.22.tgz",
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.31/opt2-tealbrick-spec-0.1.31.tgz",
+    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.23/opt2-tealbrick-miniapp-sdk-0.1.23.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.35/opt2-tealbrick-spec-0.1.35.tgz",
     "undici": "8.11.2"
   },
   "devDependencies": {
