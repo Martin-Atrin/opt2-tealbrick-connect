@@ -28,14 +28,33 @@ export function Notice({ tone = "info", children }: { tone?: "info" | "ok" | "er
   );
 }
 
-/** The page heading of the mockups (same markup as the shared standard pages in standard.tsx). */
+/**
+ * The page heading of the mockups. With a lede (Services, Accounts) the lede stacks under the h1, as in the approved
+ * mockup (`.page-head > .tb-stack`); pages without a lede put their sentence in a body `PageNote` after the head.
+ */
 export function PageHead({ title, lede }: { title: string; lede?: ReactNode }) {
   return (
     <div className="page-head">
-      <h1>{title}</h1>
-      {lede ? <p className="tb-lede">{lede}</p> : null}
+      {lede ? (
+        <div className="tb-stack head-stack">
+          <h1>{title}</h1>
+          <p className="tb-lede">{lede}</p>
+        </div>
+      ) : (
+        <h1>{title}</h1>
+      )}
     </div>
   );
+}
+
+/** The sentence under a page heading on the mockups' simple pages (Buzz, Chat bots, Senders, Keys): body text, 62ch. */
+export function PageNote({ children }: { children: ReactNode }) {
+  return <p className="tb-soft page-note">{children}</p>;
+}
+
+/** A long identity (npub, bot id) shortened in the middle, as the mockups show it: `npub180cvv07t…h6w6`. */
+export function shortId(value: string, head = 12, tail = 4): string {
+  return value.length > head + tail + 1 ? `${value.slice(0, head)}…${value.slice(-tail)}` : value;
 }
 
 /** A failed load (RUL-14): the cause and a way to try again, never an empty list that looks like "nothing here". */

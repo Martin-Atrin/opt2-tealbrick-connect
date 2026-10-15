@@ -1,14 +1,9 @@
-import { Button, Dialog, Switch, Table } from "@opt2-tealbrick/ui";
+import { Button, Dialog, EmptyState, Switch, Table } from "@opt2-tealbrick/ui";
 import { useState } from "react";
 
-import { ConfirmDialog, LoadError, Notice, PageHead } from "../components.tsx";
+import { ConfirmDialog, LoadError, Notice, PageHead, PageNote, shortId } from "../components.tsx";
 import { copyText, errorText, useLoad } from "../hooks.ts";
 import { type BuzzIdentity, buzzAgentRelaysSet, buzzIdentitiesGenerate, buzzIdentitiesList, buzzIdentityRotate, buzzProfilePublish } from "../ops.ts";
-
-function formatCreated(value: number): string {
-  const ms = value < 1e12 ? value * 1000 : value;
-  return new Date(ms).toLocaleString();
-}
 
 export function Buzz() {
   const list = useLoad(buzzIdentitiesList);
@@ -54,8 +49,8 @@ export function Buzz() {
       const out = await buzzProfilePublish();
       const down = new Set(out.published.flatMap((p) => p.relays.filter((r) => !r.ok).map((r) => r.relay)));
       const parts = [`Published ${out.published.length} profile${out.published.length === 1 ? "" : "s"}.`];
-      if (down.size > 0) parts.push(`These relays did not accept all profiles: ${[...down].join(", ")}.`);
-      if (out.failed.length > 0) parts.push(`${out.failed.length} agent${out.failed.length === 1 ? "" : "s"} could not publish on any relay.`);
+      if (down.size > 0) parts.push(`These relays didn’t accept all profiles: ${[...down].join(", ")}.`);
+      if (out.failed.length > 0) parts.push(`${out.failed.length} agent${out.failed.length === 1 ? "" : "s"} couldn’t publish on any relay.`);
       return parts.join(" ");
     });
 
@@ -67,45 +62,26 @@ export function Buzz() {
 
   const copyAll = async () => {
     const ok = await copyText(withIdentity.map((r) => r.identity.npub).join("\n"));
-    setMessage(ok ? { text: `Copied ${withIdentity.length} npub${withIdentity.length === 1 ? "" : "s"}, one per line.`, error: false } : { text: "Copy failed. Select the npubs in the table and copy them by hand.", error: true });
+    setMessage(ok ? { text: `Copied ${withIdentity.length} npub${withIdentity.length === 1 ? "" : "s"}, one per line.`, error: false } : { text: "Copy failed. Copy each npub with its Copy button.", error: true });
   };
 
   return (
     <section className="app-page" aria-label="Buzz">
-      <PageHead title="Buzz" lede="Each agent gets its own Buzz identity. Add these npubs to your channels in Buzz." />
+      <PageHead title="Buzz" />
+      <PageNote>Each agent gets its own Buzz identity. Add these npubs to your channels in Buzz.</PageNote>
       {message ? <Notice tone={message.error ? "error" : "ok"}>{message.text}</Notice> : null}
       {list.error ? <LoadError message={list.error} busy={list.loading} onRetry={() => void list.reload()} /> : null}
-
-      <section className="tb-stack" aria-labelledby="buzz-relays">
-        <h2 id="buzz-relays" className="sub-head">
-          Relays
-        </h2>
-        {list.data && relays.length === 0 ? (
-          <p className="tb-soft">No relay is set. Set the Buzz relays in Tealbrick Portal, in Connect’s settings.</p>
-        ) : null}
-        {relays.length > 0 ? (
-          <>
-            <ol className="relay-list">
-              {relays.map((r) => (
-                <li key={r}>
-                  <code className="tb-mono">{r}</code>
-                </li>
-              ))}
-            </ol>
-            <p className="tb-hint">Agents post to every relay they use and read from all of them. You change the list in Tealbrick Portal, in Connect’s settings.</p>
-          </>
-        ) : null}
-        {relayProblems.length > 0 ? (
-          <Notice tone="error">
-            {relayProblems.map((p) => (
-              <span key={p}>
-                {p}
-                <br />
-              </span>
-            ))}
-          </Notice>
-        ) : null}
-      </section>
+      {list.data && relays.length === 0 ? <p className="tb-soft">No relay is set. Set the Buzz relays in Tealbrick Portal, in Connect’s settings.</p> : null}
+      {relayProblems.length > 0 ? (
+        <Notice tone="error">
+          {relayProblems.map((p) => (
+            <span key={p}>
+              {p}
+              <br />
+            </span>
+          ))}
+        </Notice>
+      ) : null}
 
       <div className="tb-ctas">
         <Button variant="primary" disabled={busy !== null || rows.length === 0} onClick={() => void generate()}>
@@ -128,7 +104,7 @@ export function Buzz() {
           Loading agents.
         </p>
       ) : null}
-      {list.data && rows.length === 0 ? <p className="tb-soft">No agents yet. Add an agent in Tealbrick Portal first.</p> : null}
+      {list.data && rows.length === 0 ? <EmptyState title="No agents yet.">Add an agent in Tealbrick Portal first.</EmptyState> : null}
 
       {rows.length > 0 ? (
         <Table aria-label="Buzz identities">
@@ -136,7 +112,6 @@ export function Buzz() {
             <tr>
               <th scope="col">Agent</th>
               <th scope="col">npub</th>
-              <th scope="col">Created</th>
               <th scope="col">Relays</th>
               <th scope="col">
                 <span className="tb-sr">Actions</span>
@@ -150,14 +125,15 @@ export function Buzz() {
                 <td>
                   {row.identity ? (
                     <div className="npub-cell">
-                      <code className="tb-mono npub">{row.identity.npub}</code>
+                      <code className="tb-mono npub" title={row.identity.npub}>
+                        {shortId(row.identity.npub)}
+                      </code>
                       <CopyButton text={row.identity.npub} label={`Copy npub of ${row.name}`} />
                     </div>
                   ) : (
                     <span className="tb-muted">No identity yet</span>
                   )}
                 </td>
-                <td className="num">{row.identity ? formatCreated(row.identity.createdAt) : ""}</td>
                 <td>
                   <span className="relay-cell">
                     <span>{relayLabel(row.relays, relays)}</span>

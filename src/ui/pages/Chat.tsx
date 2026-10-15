@@ -1,8 +1,8 @@
 /** Chat bots (C58): connect a Slack, Teams, Telegram or Discord bot for one agent; see inbound status. */
-import { Button, Card, Field, type FlowStep, Segmented, Select, StepFlow, Swatch, Switch, Tag, TextInput } from "@opt2-tealbrick/ui";
+import { Button, Card, EmptyState, Field, type FlowStep, Segmented, Select, StepFlow, Swatch, Switch, Tag, TextInput } from "@opt2-tealbrick/ui";
 import { useState } from "react";
 
-import { LoadError, Notice, PageHead, StatusLabel } from "../components.tsx";
+import { LoadError, Notice, PageHead, PageNote, StatusLabel } from "../components.tsx";
 import { errorText, useLoad } from "../hooks.ts";
 import { type ChannelProviderInfo, channelAccountConnect, channelAccounts, channelProviders } from "../ops.ts";
 
@@ -26,10 +26,8 @@ export function Chat() {
   const picked = services.find((p) => p.service === service) ?? services[0] ?? null;
   return (
     <section className="app-page" aria-label="Chat bots">
-      <PageHead
-        title="Chat bots"
-        lede="Give an agent its own bot on Slack, Teams, Telegram or Discord. Messages to the bot reach the agent’s inbox; set the agent’s access to the bot on the Accounts page."
-      />
+      <PageHead title="Chat bots" />
+      <PageNote>Give an agent its own bot on Slack, Teams, Telegram or Discord. Messages to the bot reach the agent’s inbox.</PageNote>
       {providers.error ? <LoadError message={providers.error} busy={providers.loading} onRetry={() => void providers.reload()} /> : null}
       {picked ? (
         <>
@@ -61,7 +59,7 @@ export function Chat() {
       ) : null}
       <h2 className="sub-head">Connected bots</h2>
       {accounts.error ? <LoadError message={accounts.error} busy={accounts.loading} onRetry={() => void accounts.reload()} /> : null}
-      {accounts.data && accounts.data.accounts.length === 0 ? <p className="tb-soft">No chat bots yet.</p> : null}
+      {accounts.data && accounts.data.accounts.length === 0 ? <EmptyState title="No chat bots yet." /> : null}
       {accounts.data && accounts.data.accounts.length > 0 ? (
         <div className="ruled">
           {accounts.data.accounts.map((a) => (

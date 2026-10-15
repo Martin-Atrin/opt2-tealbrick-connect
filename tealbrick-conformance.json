@@ -1,0 +1,9 @@
+{
+  "waivers": [
+    {
+      "id": "A3.caps_count",
+      "until": "0.1.19",
+      "reason": "not_run, not a failure: Connect's only capped receipt:false agent op without a holdFamily is buzz_schedule_cancel, which needs a scheduled post OWNED BY the suite's fresh caps agent (404 buzz_scheduled_unknown otherwise); setup steps cannot run as that agent and Connect has no capped receipt:true op without a holdFamily. Cap counting is SDK code (miniapp-sdk 0.1.22 SDK-02, race tests). Conformance request filed: let a setup step run as the caps agent (C185 batch, connect 0.5.8)."
+    }
+  ]
+}

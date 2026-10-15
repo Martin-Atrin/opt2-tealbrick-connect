@@ -1,4 +1,4 @@
-import { Button, Card, Select, TextInput } from "@opt2-tealbrick/ui";
+import { Button, Card, EmptyState, Select, TextInput } from "@opt2-tealbrick/ui";
 import { type FormEvent, useMemo, useState } from "react";
 
 import { ConfirmDialog, KindBadge, LoadError, Notice, PageHead, ServiceTile, StatusLabel } from "../components.tsx";
@@ -75,7 +75,7 @@ export function Accounts() {
           Loading accounts.
         </p>
       ) : null}
-      {accounts.data && groups.length === 0 ? <p className="tb-soft">No accounts are connected yet. Open Services to connect one.</p> : null}
+      {accounts.data && groups.length === 0 ? <EmptyState title="No accounts are connected yet.">Open Services to connect one.</EmptyState> : null}
       {agents.error ? <LoadError message={`Agents couldn’t be loaded: ${agents.error}`} busy={agents.loading} onRetry={() => void agents.reload()} /> : null}
 
       {groups.map(([service, list]) => (

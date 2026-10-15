@@ -68,6 +68,21 @@ const scopesStub = {
   },
 };
 
+/** miniapp-sdk 0.1.21 JobsView (jobs, schedule, paused): Connect handlers use none of it, so any use fails loudly. */
+const jobsStub = {
+  jobs: new Proxy({}, {
+    get() {
+      throw new Error("ctx.jobs not used by Connect");
+    },
+  }) as SdkOpContext["jobs"],
+  schedule: (): never => {
+    throw new Error("ctx.schedule not used by Connect");
+  },
+  paused: (): never => {
+    throw new Error("ctx.paused not used by Connect");
+  },
+};
+
 /** Public-route context as the SDK passes it (C31 extras). */
 export function publicCtx(db: Db, input: { workspace?: string | null; keys?: Record<string, string> } = {}): SdkPublicContext {
   return {
@@ -145,6 +160,7 @@ export function testCtx(input: {
     workspace: (input.workspace === undefined ? (input.ws ?? "ws_TEST") : input.workspace) as never,
     scopes: scopesStub,
     secrets: secretsFor(input.db),
+    ...jobsStub,
     receipts,
   };
 }
@@ -164,6 +180,7 @@ export function eventCtx(db: Db): SdkEventContext {
     appsPolicy: () => null,
     agentScopeRequest: () => null,
     ownerLinkFor: () => null,
+    ...jobsStub,
   };
 }
 

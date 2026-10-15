@@ -8,14 +8,24 @@
 .cards h3 { font-size: 1.0625rem; font-weight: var(--tb-weight-head); line-height: 22px; overflow-wrap: anywhere; }
 .sub-head { font-size: var(--tb-text-title); line-height: 26px; }
 
+/* page heads of the mockups: a lede stacks under the h1 (gap 8px); the simple pages put a body sentence after the head */
+.head-stack { gap: var(--tb-s2); }
+.page-note { max-width: 62ch; }
+
 /* the service letter tile of the mockups */
 .svc { display: inline-grid; place-items: center; flex: none; width: 40px; height: 40px; border-radius: var(--tb-radius-brick); background: var(--tb-plate); font-weight: var(--tb-weight-head); color: var(--tb-ink); }
 
-.watch { display: grid; gap: var(--tb-s3); justify-items: start; }
+.watch { display: grid; gap: var(--tb-s3); }
+/* Services progress notice: the result and a small Dismiss side by side, also on phone */
+.notice-row { display: flex; align-items: flex-start; gap: var(--tb-s3); }
+.notice-row > .tb-btn { flex: none; }
+/* Services search: 480px wide on the mockup (no token: 10 × --tb-s12) */
+.svc-search { max-width: calc(var(--tb-s12) * 10); }
 
 /* Accounts */
 .group-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--tb-s3); }
 .group-head h2 { font-size: 1.375rem; text-transform: capitalize; }
+.acct-head h3 { font-size: var(--tb-text-body); }
 .acct-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--tb-s2) var(--tb-s3); }
 .acct-tags { gap: var(--tb-s2); }
 .access { gap: var(--tb-s2); }
@@ -27,16 +37,14 @@
 .tool-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--tb-s2) var(--tb-s3); }
 
 /* Buzz */
-.relay-list { display: grid; gap: var(--tb-s1); }
 .npub-cell { display: flex; align-items: center; gap: var(--tb-s2); }
-.npub { overflow-wrap: anywhere; word-break: break-all; min-width: 12ch; }
+.npub { white-space: nowrap; }
 .relay-cell { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--tb-s2); }
 .relay-choices { gap: 0; }
 .relay-legend { padding-bottom: var(--tb-s2); }
 
 /* Chat bots, Senders */
 .bot-card { display: grid; gap: var(--tb-s3); max-width: 720px; }
-.sender-note { max-width: 62ch; }
 
 @media (max-width: 720px) {
   .acc-row { grid-template-columns: 1fr; gap: var(--tb-s1); }

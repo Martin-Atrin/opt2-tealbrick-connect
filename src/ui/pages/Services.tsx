@@ -1,4 +1,4 @@
-import { Button, Card, Field, Progress, Select, StepFlow, Tag, TextInput, TextLink } from "@opt2-tealbrick/ui";
+import { Button, Card, EmptyState, Field, Progress, Select, StepFlow, TextInput, TextLink } from "@opt2-tealbrick/ui";
 import { useEffect, useState } from "react";
 
 import { LoadError, Notice, PageHead, ServiceTile } from "../components.tsx";
@@ -91,7 +91,7 @@ export function Services(props: { onOpenAccounts(): void }) {
   return (
     <section className="app-page" aria-label="Services">
       <PageHead title="Services" lede="Search the services you can connect, then sign in to your account of that service." />
-      <div className="tb-search">
+      <div className="tb-search svc-search">
         <SearchIcon />
         <TextInput type="search" aria-label="Search services" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Gmail, Calendar, Slack" autoComplete="off" maxLength={80} />
       </div>
@@ -108,7 +108,7 @@ export function Services(props: { onOpenAccounts(): void }) {
         </p>
       ) : null}
       {results.data?.catalogAvailable === false ? <Notice>The Tealbrick catalog of self-hosted apps isn’t available right now.</Notice> : null}
-      {results.data && results.data.services.length === 0 && !results.loading ? <p className="tb-soft">No service matches this search.</p> : null}
+      {results.data && results.data.services.length === 0 && !results.loading ? <EmptyState title="No service matches this search." /> : null}
 
       <ul className="cards" aria-label="Services">
         {(results.data?.services ?? []).map((service) => (
@@ -125,6 +125,12 @@ export function Services(props: { onOpenAccounts(): void }) {
 
 function WatchPanel(props: { watch: Watch; onOpenAccounts(): void; onClose(): void }) {
   const { watch } = props;
+  // A finished connection: the result with a small Dismiss beside it inside the notice (mockup "Connection progress").
+  const dismiss = (
+    <Button size="sm" onClick={props.onClose}>
+      Dismiss
+    </Button>
+  );
   return (
     <section aria-label="Connection progress" className="watch">
       {watch.phase === "waiting" ? (
@@ -138,16 +144,32 @@ function WatchPanel(props: { watch: Watch; onOpenAccounts(): void; onClose(): vo
       ) : null}
       {watch.phase === "connected" ? (
         <Notice tone="ok">
-          “{watch.label}” is connected. Next, set what each agent may do with it in <AccountsLink onOpen={props.onOpenAccounts} />.
+          <span className="notice-row">
+            <span>
+              “{watch.label}” is connected. Next, set what each agent may do with it in <AccountsLink onOpen={props.onOpenAccounts} />.
+            </span>
+            {dismiss}
+          </span>
         </Notice>
       ) : null}
       {watch.phase === "failed" ? (
         <Notice tone="error">
-          “{watch.label}” didn’t connect.{watch.detail ? ` ${watch.detail}` : ""}
+          <span className="notice-row">
+            <span>
+              “{watch.label}” didn’t connect.{watch.detail ? ` ${watch.detail}` : ""}
+            </span>
+            {dismiss}
+          </span>
         </Notice>
       ) : null}
-      {watch.phase === "timeout" ? <Notice tone="error">No answer after 5 minutes for “{watch.label}”. Check Accounts to see if it connected, or try again.</Notice> : null}
-      {watch.phase !== "waiting" ? <Button onClick={props.onClose}>Dismiss</Button> : null}
+      {watch.phase === "timeout" ? (
+        <Notice tone="error">
+          <span className="notice-row">
+            <span>No answer after 5 minutes for “{watch.label}”. Check Accounts to see if it connected, or try again.</span>
+            {dismiss}
+          </span>
+        </Notice>
+      ) : null}
     </section>
   );
 }
@@ -168,18 +190,15 @@ function AccountsLink({ onOpen }: { onOpen(): void }) {
 
 function ServiceCard(props: { service: ServiceHit; busy: boolean; onOpen(): void }) {
   const { service } = props;
+  // The mockup names the source in the description line: "Files on your own server · Tealbrick catalog".
+  const about = [service.description, service.source === "catalog" ? "Tealbrick catalog" : ""].filter(Boolean).join(" · ");
   return (
     <Card as="article" className="svc-card">
       <div className="tb-row">
         <ServiceTile name={service.name} />
         <h3>{service.name}</h3>
       </div>
-      {service.description ? <p className="tb-soft">{service.description}</p> : null}
-      {service.source === "catalog" ? (
-        <div>
-          <Tag>Tealbrick catalog</Tag>
-        </div>
-      ) : null}
+      {about ? <p className="tb-soft">{about}</p> : null}
       <ConnectState {...props} />
     </Card>
   );

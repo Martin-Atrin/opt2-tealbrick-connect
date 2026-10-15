@@ -1,6 +1,6 @@
 // UI entry: served by the SDK from dist/ui under /a/connect/ behind the person session (SDK-API §3.2, §14).
 import { TbProvider, useSession } from "@opt2-tealbrick/miniapp-sdk/client";
-import { AppShell, appArt, appColour, Button, STANDARD_PAGES, Tag } from "@opt2-tealbrick/ui";
+import { AppShell, appArt, appColour, Button, STANDARD_PAGES, Swatch, Tag } from "@opt2-tealbrick/ui";
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -34,14 +34,25 @@ function Page({ route, go, holdId, holds }: { route: Route; go(route: Route): vo
     case "senders":
       return <Senders />;
     case "holds":
-      return <HoldsPage list={holds} only={holdId ?? null} empty="No calls wait for your approval." lede="Calls that wait for your approval. Each approval allows that one call only." />;
+      return <HoldsPage list={holds} only={holdId ?? null} empty="No calls wait for your approval." />;
     case "receipts":
       return <ReceiptsPage empty="No receipts yet." lede="What your agents did through Connect. Inputs are kept only as digests." />;
     case "agents":
       return (
         <AgentsPage
           empty="No agents are connected to Connect yet. Draw a line from an agent to Connect on the Portal canvas."
-          lede="Agents connected to Connect. Set each agent’s access per account on the Accounts page."
+          render={(agents) => (
+            // The mockup row: swatch, name and one state tag (Active / Paused).
+            <div className="ruled">
+              {agents.map((a) => (
+                <div className="item" key={a.id}>
+                  <Swatch />
+                  <h3>{a.name}</h3>
+                  <div className="side">{a.status === "paused" ? <Tag status="needs-you">Paused</Tag> : <Tag>Active</Tag>}</div>
+                </div>
+              ))}
+            </div>
+          )}
         />
       );
     case "keys":

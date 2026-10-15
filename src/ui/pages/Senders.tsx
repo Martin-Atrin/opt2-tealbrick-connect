@@ -3,11 +3,17 @@
 import { Button, Card, Field, Select, TextInput } from "@opt2-tealbrick/ui";
 import { useState } from "react";
 
-import { ConfirmDialog, LoadError, Notice, PageHead } from "../components.tsx";
+import { ConfirmDialog, LoadError, Notice, PageHead, PageNote, shortId } from "../components.tsx";
 import { errorText, useLoad } from "../hooks.ts";
 import { type SenderChannel, type SenderInfo, senderIdentitiesList, senderIdentityClear, senderIdentitySet } from "../ops.ts";
 
 const NAMES: Record<SenderChannel, string> = { buzz: "Buzz", slack: "Slack", teams: "Teams", telegram: "Telegram", discord: "Discord" };
+
+/** The identity without its "<channel>:" prefix (the card already names the channel), as the mockup shows it. */
+const senderValue = (s: SenderInfo): string => {
+  const id = s.identity ?? "";
+  return id.startsWith(`${s.channel}:`) ? id.slice(s.channel.length + 1) : id;
+};
 
 export function Senders() {
   const list = useLoad(senderIdentitiesList);
@@ -34,15 +40,8 @@ export function Senders() {
 
   return (
     <section className="app-page" aria-label="Senders">
-      <PageHead
-        title="Senders"
-        lede="Apps such as Operator Inbox send messages from the identity you pick here, one per channel. Agents always send from their own identity."
-      />
-      <p className="tb-soft sender-note">
-        With no sender set, apps can’t send on that channel. By default, only the first message to a new person waits for your approval; later messages to that
-        person go out at once. To approve every message, turn on “Ask me before every message or post” in the workspace apps policy. All apps share one
-        sender per channel: after you approve a first message to a person, every app can write to that person.
-      </p>
+      <PageHead title="Senders" />
+      <PageNote>Apps such as Operator Inbox send messages from the identity you pick here, one per channel. Agents always send from their own identity.</PageNote>
       {message ? <Notice tone={message.error ? "error" : "ok"}>{message.text}</Notice> : null}
       {list.error ? <LoadError message={list.error} busy={list.loading} onRetry={() => void list.reload()} /> : null}
       <ul className="cards">
@@ -51,11 +50,19 @@ export function Senders() {
           return (
             <li key={s.channel}>
               <Card as="article" className="sender-card">
-                <h2 className="sub-head">{NAMES[s.channel]}</h2>
+                <h3>{NAMES[s.channel]}</h3>
                 {s.set ? (
                   <p className="tb-soft">
                     Apps send as <strong>{s.label}</strong>
-                    {s.identity ? <code className="tb-mono"> {s.identity}</code> : null}.
+                    {s.identity ? (
+                      <>
+                        {" "}
+                        <code className="tb-mono" title={senderValue(s)}>
+                          {shortId(senderValue(s))}
+                        </code>
+                      </>
+                    ) : null}
+                    .
                   </p>
                 ) : (
                   <p className="tb-hint">Not set. Apps can’t send on {NAMES[s.channel]}.</p>
