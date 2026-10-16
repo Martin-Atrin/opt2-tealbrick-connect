@@ -2,7 +2,7 @@
 
 Everything an agent reaches outside the workspace: Composio (Gmail, Calendar and 1,000+ apps), a Tealbrick catalog of self-hosted app connectors, custom remote MCP servers, Buzz (Nostr) identities per agent, and chat channels (Slack, Teams, Telegram, Discord). Built on the Miniapp SDK.
 
-**Status:** stable 0.5.10; `main` is 0.5.11-dev.1 (dev channel only). Visibility: public, Apache-2.0. Published as the GHCR image `ghcr.io/tealbrick/opt2-tealbrick-connect`. The largest of the apps (about 11,000 lines in `src/`).
+**Status:** stable 0.5.10; `main` is 0.5.11-dev.1 (dev channel only). Visibility: public, Apache-2.0. Published as the public GHCR image `ghcr.io/tealbrick/opt2-tealbrick-connect` (on 2026-10-17 its version tags are the dev build `0.5.11-dev.1` and a `sha-` tag; there is no `0.5.10` tag in that registry). The largest of the apps (about 11,000 lines in `src/`).
 
 - Repository: `Tealbrick/opt2-tealbrick-connect` (GitHub organisation `Tealbrick`)
 - Licence: Apache-2.0 for the app code (`LICENSE`, `NOTICE`); upstream licences are in `THIRD_PARTY_NOTICES.md`. The Tealbrick brand mark and app art are Tealbrick artwork and are not covered by the Apache-2.0 licence.
@@ -14,7 +14,7 @@ This repository is public. It must never contain secrets or personal data, and n
 - No API keys, tokens, passwords, private keys, deployment secrets, `.env` files or connection strings. Use `.env.example` with placeholder values only.
 - Runtime secrets live in the deployment platform (Railway variables) and are copied between services without printing them.
 - No personal names, private agent configurations or customer data.
-- Every push runs a secret scan (gitleaks, the `secret-scan` step in `.woodpecker/ci.yaml`). GitHub secret scanning with push protection is enabled. Optional local guard: `pre-commit install`.
+- Every pull request and every push to `main` runs a secret scan (gitleaks, the `secret-scan` step in `.woodpecker/ci.yaml`). GitHub secret scanning and push protection are not enabled on this repository, so this CI step is the guard. Optional local guard: `pre-commit install` (`.pre-commit-config.yaml` runs gitleaks).
 - If a secret is committed anyway: rotate it first, then remove it from history.
 
 ## What it does
@@ -87,14 +87,14 @@ App-specific:
 1. Set the same version in `package.json` and `tealbrick.manifest.json`. Check `publisher` and `source.repo` in the manifest; the repository name must match the image name in `tealbrick-ci.json` (`opt2-tealbrick-connect`).
 2. Tag `v<semver>` on a green pipeline and push the tag. Tags are immutable.
 3. The release Action pushes the GHCR image and the kit tarball. `registry-sync` signs the index entry with the image digest and the manifest digest.
-4. Core deploys the newest stable version when the owner installs or updates the app. An update that fails keeps the previous version serving.
+4. Core deploys the newest stable version when the owner installs or updates the app. Core main (portal-core#1, E3) switches to the new version only after a health check and rolls back when it fails; the live Core does not have this yet (it goes live with RS-3, per the portal-core README).
 
 The catalog artifact (`catalog-0.1.0`, sha256 pinned in the manifest) is built with `pnpm catalog:build` and attached to a GitHub release.
 
 ## Dependency pins
 
 - `@opt2-tealbrick/*` dependencies are pinned as tarball URLs on the dist host (`Tealbrick/opt2-tealbrick-dist` releases). `pnpm-lock.yaml` carries the sha512 integrity of every such tarball. After changing one, run `pnpm install`, then `node <opt2-tealbrick-platform>/ci/tb-ci.ts pin-tarballs .`, then `pnpm install --frozen-lockfile`, and commit the lockfile. Image builds run `pnpm install --frozen-lockfile --ignore-scripts`.
-- `pnpm build` writes the UI to `dist/ui/index.html` + `dist/ui/assets-<content hash>/`; the SDK serves `index.html` as `no-cache` and the hashed directory as immutable, so a deploy is visible at once.
+- `pnpm build` writes the UI to a flat `dist/ui/` (`index.html`, the compiled modules and `vendor/`). `scripts/build-ui.ts` does not adopt the template's content-hash directory, so the SDK serves every UI file as `no-cache` and a deploy is visible at once.
 
 ## Documentation
 

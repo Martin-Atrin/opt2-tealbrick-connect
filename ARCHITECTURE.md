@@ -1,10 +1,10 @@
 # Connect (Tealbrick mini app): architecture
 
-State: verified against the repo on 2026-10-16. Claims cite paths in this repo. Anything not verified is marked UNVERIFIED. For the whole system see the system `ARCHITECTURE.md` and `SYSTEM-OVERVIEW.md`.
+State: verified against the repo on 2026-10-17. Claims cite paths in this repo. Anything not verified is marked UNVERIFIED. For the whole system see the system `ARCHITECTURE.md` and `SYSTEM-OVERVIEW.md`.
 
-## Common app pattern (verified for all seven apps)
+## Common app pattern (verified for this repo on 2026-10-17)
 
-- **Runtime**: Node 24, TypeScript run through `tsc` to `dist/`, UI built by `scripts/build-ui.ts` (no bundler; content-hashed `assets-<hash>/`). The app is started by `startApp` from `@opt2-tealbrick/miniapp-sdk` (`src/main.ts`).
+- **Runtime**: Node 24, TypeScript run through `tsc` to `dist/`, UI built by `scripts/build-ui.ts` (no bundler). Connect writes a flat `dist/ui/`; it does not adopt the template's content-hashed `assets-<hash>/` directory (header of `scripts/build-ui.ts`). The app is started by `startApp` from `@opt2-tealbrick/miniapp-sdk` (`src/main.ts`).
 - **Dockerfile**: two stages on `node:24-slim` pinned by digest, `pnpm install --frozen-lockfile --ignore-scripts`, `pnpm run build && pnpm prune --prod`, the manifest also copied to `/opt/tb/tealbrick.manifest.json` (the `tb-exec` default), `USER node`, no `VOLUME`. The SDK drops root to uid 1000 itself when the platform starts the container as root (Railway volumes are root-owned).
 - **Data**: one SQLite file `TB_DATA_DIR/app.db` owned by the SDK. App tables use their own prefix; SDK tables use `tb_*`. On Railway there is ONE volume per service: the backup directory is `<data mount>/backup`, so the volume size is data plus backup (C28).
 - **Migrations**: `migrations/NNNN_name.sql` (or `.ts` exporting `up(db)`). The SDK enforces forward-only: gap-free from 0001, one transaction each, sha256 recorded in `tb_migrations`. A changed, missing, misnamed or `down` migration stops the app with `migration_invalid`.
@@ -39,7 +39,7 @@ Connect is the one place for outside connectivity (C16 and the PRD). Per connect
 
 ## Settings, keys and environment
 
-Setting `buzz_relays` (up to 8 `wss://` lines, optional) becomes `CONNECT_BUZZ_RELAYS`. Key `COMPOSIO_API_KEY` (account default, optional). `TB_DATA_DIR` (default `/data`) holds the catalog cache. `CONNECT_BUZZ_RELAY_URL` is a removed setting; its presence is reported as an owner error. `.env.example` lists `CONNECT_DATA_DIR` and `CONNECT_SECRET_ENCRYPTION_KEY`; no code reads them (stale). The Dockerfile does NOT set `TB_DATA_DIR` or `TB_BACKUP_DIR`; the deploy recipe must (UNVERIFIED).
+Setting `buzz_relays` (up to 8 `wss://` lines, optional) becomes `CONNECT_BUZZ_RELAYS`. Key `COMPOSIO_API_KEY` (account default, optional). `TB_DATA_DIR` (default `/data`) holds the catalog cache. `CONNECT_BUZZ_RELAY_URL` is a removed setting; its presence is reported as an owner error. `.env.example` lists `CONNECT_DATA_DIR` and `CONNECT_SECRET_ENCRYPTION_KEY`; no code reads them (stale). The Dockerfile does NOT set `TB_DATA_DIR` or `TB_BACKUP_DIR`; the deploy recipe sets them (SDK-API section 13; `tb-gen railway` sets both).
 
 ## Data
 
@@ -59,17 +59,16 @@ Services, Accounts, Buzz, Chat bots, Senders, Holds, Receipts, Agents and scopes
 
 A Composio key only if Composio services are used. Buzz relays only if Buzz is used. Public routes (3, unauthenticated by design): `/oauth/composio/callback`, `/oauth/mcp/callback`, `/inbound/teams` (Bot Framework JWT verified, 128 KiB cap). A catalog artifact `catalog-0.1.0` (sha256 pinned in the manifest).
 
-Port 8314. 0.5 cpu, 512 MB. Data 2 GB plus backup 5 GB (7 GB merged). Needs a non-sleeping container (long-lived outbound sockets). Backup cron `23 3 * * *`, retain 14. `EXPOSE 8314`.
+Port 8314. 0.5 cpu, 512 MB. Data 2 GB plus backup 5 GB declared as two volumes; Core and the generated Railway recipe merge them into one volume at the data mount (SDK-API 7.3; `TB_BACKUP_DIR=/data/backup`). Needs a non-sleeping container (long-lived outbound sockets). Backup cron `23 3 * * *`, retain 14. `EXPOSE 8314`.
 
 ## Pinned packages
 
 Stable 0.5.10: miniapp-sdk 0.1.24, spec 0.1.35. Main (0.5.11-dev.1): miniapp-sdk 0.1.25, spec 0.1.39. Both: manifest 0.1.18, conformance 0.1.18, ui 0.2.4. Also `@noble/curves`, `@noble/hashes`, `undici`.
 
-All `@opt2-tealbrick/*` pins use dist-host tarball URLs. Upgrade safety (SDK 0.1.25: pre-update snapshot, migration lock, failed mode) is in this app only where the pin above says 0.1.25 (dev channel, RS-3 candidates). The other apps re-pin in RS-3 (dev channel first, stable after the qa1 soak). Until then Core can roll back an update of such an app only as an image (no data restore).
+All `@opt2-tealbrick/*` pins use dist-host tarball URLs. Upgrade safety (SDK 0.1.25: pre-update snapshot, migration lock, failed mode) is in this app only where the pin above says 0.1.25 (dev channel, RS-3 candidates). The other apps re-pin in RS-3 (dev channel first, stable after the qa1 soak). Core main (portal-core#1, E3) restores the snapshot on an automatic rollback, but that Core is not live yet (it goes live with RS-3, per the portal-core README). Until then Core can roll back an update only as an image (no data restore).
 
 ## Known gaps
 
-- README lists `src/secrets.ts` (gone since C31) and omits channels, MCP and catalog sources, `hold-view.ts`, `senders.ts`, and migrations 0003 to 0009. Fix it.
 - Dockerfile comment says `TB_DATA_DIR=/data` but the image does not set it.
 - A conformance waiver `A3.caps_count` is live until conformance 0.1.19 (the pinned suite is 0.1.18).
 - Telegram, Discord and Slack code paths were exercised mostly in unit tests; live checks of cross-agent chat-bot messages need a bot token (UNVERIFIED).
