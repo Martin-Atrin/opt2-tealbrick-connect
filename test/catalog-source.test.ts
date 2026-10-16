@@ -83,7 +83,7 @@ test("request building: per-segment encoding, no path escape, caller cannot set 
 test("app: connect a catalog account with an API key, tiers apply, secrets scrubbed from responses", async () => {
   const gz = bundle();
   const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
-  manifest.artifacts = [{ id: "catalog", version: "9.9.9", sha256: sha(gz), url: "https://github.com/Martin-Atrin/opt2-tealbrick-connect/releases/download/catalog-9.9.9/x.json.gz" }];
+  manifest.artifacts = [{ id: "catalog", version: "9.9.9", sha256: sha(gz), url: "https://github.com/Tealbrick/opt2-tealbrick-connect/releases/download/catalog-9.9.9/x.json.gz" }];
   const upstream = fakeFetch({
     "GET /api/subscribers": ({ headers }) => ({ body: { results: [{ email: "a@example.com" }], echoAuth: headers.get("authorization") } }),
     "POST /api/subscribers": () => ({ body: { id: 1 } }),
