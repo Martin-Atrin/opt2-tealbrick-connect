@@ -168,12 +168,12 @@ after(async () => {
   if (dataDir) rmSync(dataDir, { recursive: true, force: true });
 });
 
-/** One signed op call. An app caller carries a bound companion grant whose workflow lists the op; an agent a free grant. */
-async function call(caller: `ins_${string}` | `agt_${string}`, op: string, input: Record<string, Json> = {}): Promise<{ status: number; body: Record<string, any> }> {
+/** One signed op call. An app caller carries a bound companion grant whose workflow lists the op (and, when `prd` is given, the grant claim `prd` of manifest >= 0.1.23); an agent a free grant. */
+async function call(caller: `ins_${string}` | `agt_${string}`, op: string, input: Record<string, Json> = {}, prd?: string): Promise<{ status: number; body: Record<string, any> }> {
   const app = caller.startsWith("ins_");
   const sub = (app ? `tb:ins:${caller}` : `tb:agt:${caller}`) as `tb:agt:agt_${string}`;
   const grant = await signGrant(
-    { iss: "tb:portal", sub, aud: `tb:ins:${w.ins}`, iat: nowS(), ws: w.ws, cnf: { brg: w.brg }, crud: ["read"], mode: app ? "bound" : "free", held: [], caps: {}, wf: app ? [op] : [], polrev: 1 },
+    { iss: "tb:portal", sub, aud: `tb:ins:${w.ins}`, iat: nowS(), ws: w.ws, cnf: { brg: w.brg }, crud: ["read"], mode: app ? "bound" : "free", held: [], caps: {}, wf: app ? [op] : [], polrev: 1, ...(prd === undefined ? {} : { prd }) } as Parameters<typeof signGrant>[0],
     w.portal,
   );
   const jti = (JSON.parse(Buffer.from(grant.split(".")[1] as string, "base64url").toString("utf8")) as { jti: string }).jti;
@@ -248,5 +248,36 @@ test("an agent (even the account's owner) is refused no_access; every served cal
   await call(w.liar, "data_catalog", { account });
   const row = appDb.prepare("SELECT product, caller_type, caller_id, outcome FROM connect_data_audit WHERE caller_id = ? AND op = 'data_catalog' ORDER BY id DESC LIMIT 1").get(w.liar);
   assert.deepEqual({ ...row }, { product: "knowledge", caller_type: "app", caller_id: w.liar, outcome: "ok" });
+  shares.set(account, "knowledge", "none");
+});
+
+test("a grant whose prd differs from the slice product of the same instance is refused grant_invalid by the SDK: no data, no handler call, no audit row", async () => {
+  shares.set(account, "knowledge", "shared", true);
+  shares.set(account, "observer", "shared", true);
+  const before = Number(appDb.prepare("SELECT COUNT(*) AS n FROM connect_data_audit").get()?.n);
+  for (const op of ["data_accounts_list", "data_catalog", "data_pull"] as const) {
+    // the slice says liar = knowledge; the grant says observer (which also has a share): refused, whichever product is "better"
+    for (const prd of ["observer", "someone-else"]) {
+      const r = await call(w.liar, op, inputOf(op), prd);
+      assert.deepEqual([r.status, code(r)], [403, "grant_invalid"], `${op} prd ${prd}`);
+      assert.equal(r.body.output, undefined);
+    }
+    // the same prd as the slice entry is served
+    assert.equal((await call(w.liar, op, inputOf(op), "knowledge")).status, 200, op);
+  }
+  const after = Number(appDb.prepare("SELECT COUNT(*) AS n FROM connect_data_audit").get()?.n);
+  assert.equal(after - before, 3, "only the three served calls reached the handler");
+  shares.set(account, "knowledge", "none");
+  shares.set(account, "observer", "none");
+});
+
+test("an app the slice does not list yet is identified by the grant prd (GRANT-PRD), and only by it", async () => {
+  shares.set(account, "knowledge", "shared", true);
+  const served = await call(w.stranger, "data_catalog", inputOf("data_catalog"), "knowledge");
+  assert.equal(served.status, 200, JSON.stringify(served.body));
+  assert.equal(served.body.output.account, account);
+  // a prd with no share sees nothing; without a prd the caller is unverified again
+  assert.equal(code(await call(w.stranger, "data_catalog", inputOf("data_catalog"), "observer")), "not_found");
+  assert.equal(code(await call(w.stranger, "data_catalog", inputOf("data_catalog"))), "caller_unverified");
   shares.set(account, "knowledge", "none");
 });
