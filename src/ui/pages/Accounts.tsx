@@ -7,19 +7,28 @@ import {
   type AccessLevel,
   type Account,
   type AgentInfo,
+  accountAppShare,
   accountDisconnect,
   accountsOverview,
   accountUpdate,
   agentsList,
   catalogAccountTest,
+  type DataApp,
   type McpToolRow,
   mcpToolReadSet,
   mcpToolsList,
+  type ShareLevel,
   scopesSet,
   toolsRefresh,
 } from "../ops.ts";
 
 type Picked = AccessLevel | "none";
+
+const SHARE_OPTIONS: { value: ShareLevel; label: string }[] = [
+  { value: "none", label: "Not shared" },
+  { value: "available", label: "Names and counts only" },
+  { value: "shared", label: "Share (read only)" },
+];
 
 const LEVEL_OPTIONS: { value: Picked; label: string }[] = [
   { value: "none", label: "None" },
@@ -95,6 +104,7 @@ export function Accounts() {
                   account={account}
                   ownerName={agentName(account.ownerAgent)}
                   agents={agents.data ?? []}
+                  dataApps={accounts.data?.dataApps ?? []}
                   onRenamed={() => {
                     setNotice(null);
                     void accounts.reload();
@@ -199,7 +209,7 @@ function RefreshTools({ service }: { service: string }) {
   );
 }
 
-function AccountRow(props: { account: Account; ownerName: string; agents: AgentInfo[]; onRenamed(): void; onDisconnect(): void }) {
+function AccountRow(props: { account: Account; ownerName: string; agents: AgentInfo[]; dataApps: DataApp[]; onRenamed(): void; onDisconnect(): void }) {
   const { account } = props;
   const [editing, setEditing] = useState(false);
   const [label, setLabel] = useState(account.label);
@@ -254,6 +264,7 @@ function AccountRow(props: { account: Account; ownerName: string; agents: AgentI
       {error ? <Notice tone="error">{error}</Notice> : null}
       {account.status === "failed" && account.detail ? <p className="tb-soft">{account.detail}</p> : null}
       {account.status === "connected" ? <AgentAccess account={account} agents={props.agents} /> : null}
+      {account.status === "connected" && account.source === "channel" && props.dataApps.length > 0 ? <AppSharing account={account} apps={props.dataApps} /> : null}
       {!editing ? (
         <div className="tb-ctas">
           <Button size="sm" onClick={() => setEditing(true)} aria-label={`Rename ${account.label}`}>
@@ -331,6 +342,50 @@ function AgentAccess({ account, agents }: { account: Account; agents: AgentInfo[
             placeholder="Choose access"
             disabled={busy === agent.id}
             onValueChange={(v) => v !== currentLevel(agent) && void change(agent, v as Picked)}
+          />
+        </div>
+      ))}
+    </fieldset>
+  );
+}
+
+/**
+ * C230 R3: the owner decides which app may read a chat account's messages. "Share with <app> (read only)" lets that app
+ * pull the messages (Connect keeps them 30 days); "Names and counts only" shows it the conversation names and counts and
+ * no message. Agents never see this: the data operations serve apps only.
+ */
+function AppSharing({ account, apps }: { account: Account; apps: DataApp[] }) {
+  const [local, setLocal] = useState<Record<string, ShareLevel>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const current = (app: DataApp): ShareLevel => local[app.product] ?? account.shares?.find((x) => x.product === app.product)?.level ?? "none";
+
+  const change = async (app: DataApp, value: ShareLevel) => {
+    setBusy(app.product);
+    setError(null);
+    try {
+      await accountAppShare(account.id, app.product, value);
+      setLocal((l) => ({ ...l, [app.product]: value }));
+    } catch (e) {
+      setError(`${app.name}: ${errorText(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <fieldset className="tb-stack access">
+      <legend className="tb-label access-legend">Apps (read only)</legend>
+      {error ? <Notice tone="error">{error}</Notice> : null}
+      {apps.map((app) => (
+        <div key={app.product} className="acc-row">
+          <span>Share with {app.name} (read only)</span>
+          <Select
+            aria-label={`Share ${account.label} with ${app.name}`}
+            options={SHARE_OPTIONS}
+            value={current(app)}
+            disabled={busy === app.product}
+            onValueChange={(v) => v !== current(app) && void change(app, v as ShareLevel)}
           />
         </div>
       ))}
