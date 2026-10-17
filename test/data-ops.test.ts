@@ -79,7 +79,7 @@ async function setup(options: { history?: ChannelService[]; services?: ChannelSe
   const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), channelProviders: providers, channelNet: net, ...(options.noSeam ? {} : { verifiedAppProduct: (ctx) => VERIFIED[ctx.caller.id] ?? null }) });
   await app.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "Agent", mode: "free", status: "active" }, eventCtx(db));
   const accounts = new AccountStore(db);
-  const hub = new ChannelHub({ db, accounts, secrets: memorySecrets(), providers, net });
+  const hub = new ChannelHub({ db, accounts, secrets: memorySecrets(), providers, net, log });
   const person = testCtx({ db, person: true, log });
   const knowledge = testCtx({ db, app: KNOWLEDGE, appName: "Knowledge", log });
   const observer = testCtx({ db, app: OBSERVER, appName: "Observer", log });
@@ -715,13 +715,113 @@ test("B: Slack, Telegram and Discord events (real parsers) → the log → data_
   assert.equal(((await s.op("data_catalog", { account: dc }, s.ctx.knowledge)) as unknown as { datasets: { deletions: boolean }[] }).datasets[0]?.deletions, true);
 });
 
-test("B: an edit of a message Connect never logged is stored as a new row; a deletion of one is dropped; a bot's edit does not reach agents", async () => {
+test("B: an edit or a deletion of a message Connect never logged is an orphan: dropped and counted, never a row an agent could see (Telegram, Discord, Slack parsers)", async () => {
+  const s = await setup();
+  const tg = await s.connect("telegram", "tg");
+  const dc = await s.connect("discord", "dc");
+  const sl = await s.connect("slack", "sl");
+  for (const a of [tg, dc, sl]) await s.share(a, "knowledge", "shared");
+  const feed = (acct: string, m: InboundMessage | null | undefined) => {
+    assert.ok(m);
+    s.hub.ingest(s.accounts.get(acct) as NonNullable<ReturnType<AccountStore["get"]>>, m);
+  };
+  feed(tg, parseTelegramUpdate({ update_id: 1, edited_message: { message_id: 7, date: 1_760_000_000, chat: { id: 5550001, type: "private" }, from: { id: 5550001, first_name: "Ada" }, text: "old message, edited", edit_date: 1_760_000_100 } }, { botId: "999", botName: "b" }, 1));
+  const gw = { id: "4400000000000000001", channel_id: "3300000000000000001", guild_id: "2200000000000000001", author: { id: "6600000000000000001", username: "ada" }, content: "old", attachments: [], timestamp: "2026-10-12T09:01:02.345000+00:00", type: 0 };
+  feed(dc, parseDiscordUpdate({ ...gw, content: "old, edited", edited_timestamp: "2026-10-12T09:05:00.000000+00:00" }, ["999"], 1));
+  for (const m of parseDiscordDeletes({ id: gw.id, channel_id: gw.channel_id }, 1)) feed(dc, m);
+  const bot = { botId: "U0BOTUSER1", botName: "bot", workspace: "T0TESTTEAM" };
+  const slack = (event: Record<string, unknown>) => parseSlackEvent({ type: "event_callback", team_id: "T0TESTTEAM", event_id: "Ev0ORPHAN01", event: { type: "message", channel: "C0GENERAL1", channel_type: "channel", ...event } }, bot, () => T0)?.message;
+  feed(sl, slack({ subtype: "message_changed", message: { user: "U0HUMAN001", text: "edited", ts: "1700000200.000100", edited: { ts: "1700000260.000100" } } }));
+  assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM connect_channel_inbox").get()?.n, 0, "no row from an edit or a delete of an unknown message");
+  for (const a of [tg, dc, sl]) assert.deepEqual((await s.pull(a)).rows, []);
+  const counts = Object.fromEntries(((await s.op("channel_accounts", {})) as unknown as { accounts: { id: string; bot: { unmatchedChanges: number } }[] }).accounts.map((a) => [a.id, a.bot.unmatchedChanges]));
+  assert.deepEqual(counts, { [tg]: 1, [dc]: 2, [sl]: 1 });
+  assert.equal(s.logs.filter((l) => l.msg.includes("not in the log")).length, 4);
+  assert.ok(!JSON.stringify(s.logs).includes("old message"), "the log holds metadata only");
+  for (const [id, agentCtx] of [[tg, testCtx({ db: s.db, agent: AGENT, access: { [tg]: "read" } })]] as const) {
+    assert.deepEqual(((await s.op("channel_inbox", { account: id }, agentCtx)) as unknown as { messages: unknown[] }).messages, []);
+  }
+  // quiet on good: a normal edit of a logged message is not an orphan
+  feed(tg, parseTelegramUpdate({ update_id: 3, message: { message_id: 8, date: 1_760_000_000, chat: { id: 5550001, type: "private" }, from: { id: 5550001, first_name: "Ada" }, text: "fresh" } }, { botId: "999", botName: "b" }, 1));
+  feed(tg, parseTelegramUpdate({ update_id: 4, edited_message: { message_id: 8, date: 1_760_000_000, chat: { id: 5550001, type: "private" }, from: { id: 5550001, first_name: "Ada" }, text: "fresh, edited", edit_date: 1_760_000_100 } }, { botId: "999", botName: "b" }, 1));
+  assert.deepEqual((await s.pull(tg)).rows.map((r) => r.text), ["fresh, edited"]);
+  assert.equal(s.logs.filter((l) => l.msg.includes("not in the log")).length, 4);
+});
+
+test("B: an edit is ordered and idempotent: a replay or an older edit takes no new rev; a deletion of a deleted message is a no-op", async () => {
   const s = await setup();
   const acct = await s.connect("telegram", "t1");
   await s.share(acct, "knowledge", "shared");
-  s.ingest(acct, s.msg(1, { change: { kind: "edit", at: T0 + 5000 } }), s.msg(2, { change: { kind: "delete" } }));
-  const rows = (await s.pull(acct)).rows;
-  assert.deepEqual(rows.map((r) => [r.id, r.editedAt]), [["m1", new Date(T0 + 5000).toISOString()]]);
+  s.ingest(acct, s.msg(1));
+  const rev = () => Number(s.db.prepare("SELECT rev FROM connect_channel_inbox WHERE message_id = 'm1'").get()?.rev);
+  assert.equal(rev(), 1);
+  assert.equal(s.hub.markEdited(acct, "chan-1", "m1", "v2", T0 + 2000), true);
+  assert.equal(rev(), 2);
+  assert.equal(s.hub.markEdited(acct, "chan-1", "m1", "v2", T0 + 2000), false, "replay");
+  assert.equal(s.hub.markEdited(acct, "chan-1", "m1", "v1.5", T0 + 1000), false, "an older edit arriving late");
+  assert.equal(rev(), 2);
+  assert.equal(s.db.prepare("SELECT text FROM connect_channel_inbox WHERE message_id = 'm1'").get()?.text, "v2");
+  assert.equal(s.hub.markEdited(acct, "chan-1", "m1", "v3", T0 + 3000), true);
+  assert.equal(rev(), 3);
+  assert.equal(s.hub.markDeleted(acct, "chan-1", "m1"), true);
+  assert.equal(s.hub.markDeleted(acct, "chan-1", "m1"), false);
+  assert.equal(rev(), 4, "the replayed deletion took no rev");
+  // an edit that arrives after the deletion changes nothing and is not an orphan
+  s.hub.ingest(s.accounts.get(acct) as NonNullable<ReturnType<AccountStore["get"]>>, s.msg(1, { change: { kind: "edit", at: T0 + 9000 } }));
+  assert.equal(rev(), 4);
+  assert.equal(s.db.prepare("SELECT unmatched_changes AS n FROM connect_channel_bots WHERE account_id = ?").get(acct)?.n, 0);
+});
+
+test("channel_reply to a deleted message is 404 channel_message_unknown", async () => {
+  const s = await setup();
+  const acct = await s.connect("telegram", "t1");
+  s.ingest(acct, s.msg(1), s.msg(2));
+  const seq = (id: string) => Number(s.db.prepare("SELECT seq FROM connect_channel_inbox WHERE message_id = ?").get(id)?.seq);
+  const agent = testCtx({ db: s.db, agent: AGENT, access: { [acct]: "read_update" } });
+  assert.deepEqual(await s.op("channel_reply", { account: acct, seq: seq("m2"), text: "ok" }, agent), { messageId: "sent-1", conversation: "chan-1" });
+  s.hub.markDeleted(acct, "chan-1", "m1");
+  const r = await refusal(s.op("channel_reply", { account: acct, seq: seq("m1"), text: "ok" }, agent));
+  assert.deepEqual([r.code, r.httpStatus], ["channel_message_unknown", 404]);
+});
+
+// ── bots' rows are kept only for an account with an app share; the agent inbox moves past hidden rows ──
+
+test("bots: another bot's message is stored only while the account has an app share; without one it is dropped as before R3", async () => {
+  const s = await setup();
+  const acct = await s.connect("slack", "sl");
+  s.ingest(acct, s.msg(1, { senderId: "B0OTHERBOT", senderIsBot: true }));
+  assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM connect_channel_inbox").get()?.n, 0, "no share: dropped");
+  await s.share(acct, "knowledge", "available");
+  s.ingest(acct, s.msg(2, { senderId: "B0OTHERBOT", senderIsBot: true }), s.msg(3, { senderId: "U0HUMAN001" }));
+  assert.deepEqual(s.db.prepare("SELECT message_id FROM connect_channel_inbox ORDER BY seq").all().map((r) => r.message_id), ["m2", "m3"]);
+  await s.share(acct, "knowledge", "none");
+  s.ingest(acct, s.msg(4, { senderId: "B0OTHERBOT", senderIsBot: true }));
+  assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM connect_channel_inbox WHERE message_id = 'm4'").get()?.n, 0, "share withdrawn: dropped again");
+});
+
+test("inbox: nextSeq moves past hidden rows (other bots' messages, deleted messages); a full window ends at its last visible row", async () => {
+  const s = await setup();
+  const acct = await s.connect("slack", "sl");
+  await s.share(acct, "knowledge", "available");
+  const agent = testCtx({ db: s.db, agent: AGENT, access: { [acct]: "read" } });
+  const inbox = async (since: number, limit?: number) => (await s.op("channel_inbox", { sinceSeq: since, ...(limit ? { limit } : {}) }, agent)) as unknown as { messages: { messageId: string }[]; nextSeq: number };
+  const seq = (id: string) => Number(s.db.prepare("SELECT seq FROM connect_channel_inbox WHERE message_id = ?").get(id)?.seq);
+  s.ingest(acct, s.msg(1, { senderId: "U0HUMAN001" }), s.msg(2, { senderId: "B0OTHERBOT", senderIsBot: true }), s.msg(3, { senderId: "B0OTHERBOT", senderIsBot: true }));
+  const first = await inbox(0);
+  assert.deepEqual(first.messages.map((m) => m.messageId), ["m1"]);
+  assert.equal(first.nextSeq, seq("m3"), "past the two hidden bot rows");
+  assert.deepEqual((await inbox(first.nextSeq)).messages, []);
+  assert.equal((await inbox(first.nextSeq)).nextSeq, seq("m3"));
+  // a deleted message hides too
+  s.ingest(acct, s.msg(4, { senderId: "U0HUMAN001" }));
+  s.hub.markDeleted(acct, "chan-1", "m4");
+  assert.equal((await inbox(first.nextSeq)).nextSeq, seq("m4"));
+  // a full window ends at its last visible row (the rest is read next time)
+  s.ingest(acct, s.msg(5, { senderId: "U0HUMAN001" }), s.msg(6, { senderId: "U0HUMAN001" }), s.msg(7, { senderId: "B0OTHERBOT", senderIsBot: true }));
+  const window = await inbox(first.nextSeq, 1);
+  assert.deepEqual([window.messages.map((m) => m.messageId), window.nextSeq], [["m5"], seq("m5")]);
+  const rest = await inbox(window.nextSeq, 5);
+  assert.deepEqual([rest.messages.map((m) => m.messageId), rest.nextSeq], [["m6"], seq("m7")]);
 });
 
 // ── C: a share starts when it is made ──
@@ -765,7 +865,7 @@ test("C: set_at is kept by a call that changes nothing and moves when the level 
 
 // ── E: receipts and audit ──
 
-test("E: account_app_share writes a receipt line; every data_pull writes one audit line (app, account, dataset, row count; no text)", async () => {
+test("E: account_app_share writes a receipt line; every data_* call writes one audit line (op, outcome, caller, product, account, dataset, row count; no text), refusals too", async () => {
   const s = await setup();
   const acct = await s.connect("telegram", "t1", "Support bot");
   const person = testCtx({ db: s.db, person: true });
@@ -775,16 +875,40 @@ test("E: account_app_share writes a receipt line; every data_pull writes one aud
   s.ingest(acct, s.msg(1, { text: "private words" }), s.msg(2));
   await s.pull(acct, { limit: 1 });
   await s.pull(acct);
-  const audit = s.db.prepare("SELECT product, account_id, dataset, row_count, quarantined FROM connect_data_audit ORDER BY id").all();
-  assert.deepEqual(audit.map((r) => ({ ...r })), [
-    { product: "knowledge", account_id: acct, dataset: "messages", row_count: 1, quarantined: 0 },
-    { product: "knowledge", account_id: acct, dataset: "messages", row_count: 2, quarantined: 0 },
+  await s.op("data_catalog", { account: acct }, s.ctx.knowledge);
+  await s.op("data_accounts_list", {}, s.ctx.knowledge);
+  // refusals: an agent, an unshared app, an unknown account, an unknown dataset
+  await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.agent));
+  await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.observer));
+  await refusal(s.op("data_catalog", { account: "cna_nope" }, s.ctx.knowledge));
+  await refusal(s.op("data_pull", { account: acct, dataset: "orders" }, s.ctx.knowledge));
+  const audit = s.db.prepare("SELECT op, outcome, caller_type, product, account_id, dataset, row_count FROM connect_data_audit ORDER BY id").all().map((r) => ({ ...r }));
+  const ok = { caller_type: "app", product: "knowledge", account_id: acct };
+  assert.deepEqual(audit, [
+    { op: "data_pull", outcome: "ok", ...ok, dataset: "messages", row_count: 1 },
+    { op: "data_pull", outcome: "ok", ...ok, dataset: "messages", row_count: 2 },
+    { op: "data_catalog", outcome: "ok", ...ok, dataset: null, row_count: 0 },
+    { op: "data_accounts_list", outcome: "ok", caller_type: "app", product: "knowledge", account_id: null, dataset: null, row_count: 0 },
+    { op: "data_pull", outcome: "no_access", caller_type: "agent", product: null, account_id: acct, dataset: "messages", row_count: 0 },
+    { op: "data_pull", outcome: "not_found", caller_type: "app", product: "observer", account_id: acct, dataset: "messages", row_count: 0 },
+    { op: "data_catalog", outcome: "not_found", caller_type: "app", product: "knowledge", account_id: "cna_nope", dataset: null, row_count: 0 },
+    { op: "data_pull", outcome: "not_found", caller_type: "app", product: "knowledge", account_id: acct, dataset: "orders", row_count: 0 },
   ]);
   assert.ok(!JSON.stringify(s.db.prepare("SELECT * FROM connect_data_audit").all()).includes("private words"));
   assert.ok(s.logs.some((l) => l.msg === "data_pull" && l.fields?.rows === 1));
-  // a refused pull writes nothing
-  await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.observer));
-  assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM connect_data_audit").get()?.n, 2);
+});
+
+test("E: while the gate is closed (no verified product) the refused calls are audited too, with the caller and no product", async () => {
+  const s = await setup({ noSeam: true });
+  const acct = await s.connect("telegram", "t1");
+  await s.share(acct, "knowledge", "shared");
+  await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.knowledge));
+  await refusal(s.op("data_catalog", { account: acct }, s.ctx.person));
+  const audit = s.db.prepare("SELECT op, outcome, caller_type, caller_id, product FROM connect_data_audit ORDER BY id").all().map((r) => ({ ...r }));
+  assert.deepEqual(audit, [
+    { op: "data_pull", outcome: "data_ops_unavailable", caller_type: "app", caller_id: KNOWLEDGE, product: null },
+    { op: "data_catalog", outcome: "data_ops_unavailable", caller_type: "person", caller_id: "per_01TESTOWNER00000000000000", product: null },
+  ]);
 });
 
 // ── F: cursors are per account ──

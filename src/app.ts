@@ -495,8 +495,9 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
   };
   /** The ONE refusal for every account the calling app cannot see (unknown, not a chat account, not connected, not shared with it). */
   const noSuchAccount = (): never => fail("not_found", "No such account.", 404);
-  const dataAccount = (s: Services, ctx: OpContext, raw: unknown, need: "available" | "shared"): { account: Account; level: "available" | "shared"; product: string; since: number | null } => {
+  const dataAccount = (s: Services, ctx: OpContext, raw: unknown, need: "available" | "shared", note?: { product?: string | null }): { account: Account; level: "available" | "shared"; product: string; since: number | null } => {
     const product = dataCaller(ctx);
+    if (note) note.product = product;
     const id = str(raw);
     const account = id ? s.accounts.get(id) : null;
     if (!product || !account || account.source !== "channel" || account.status !== "connected") return noSuchAccount();
@@ -530,53 +531,98 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     return Number.isNaN(ms) ? fail(`${name}_invalid`, `${name} must be an RFC 3339 time, for example 2026-10-17T10:00:00Z.`) : ms;
   };
 
+  interface AuditNote {
+    product?: string | null;
+    account?: string;
+    dataset?: string;
+    rows?: number;
+    quarantined?: number;
+  }
+  /**
+   * One audit line per data_* call, refused ones too (outcome = the refusal code): who called (type and id), which op, the
+   * verified product when there is one, account, dataset, row count. Never message text. The account and dataset are
+   * recorded as the caller named them (clipped), because a refusal has no resolved account.
+   */
+  const audited = async (op: string, ctx: OpContext, input: Json, body: (note: AuditNote) => Promise<Json>): Promise<Json> => {
+    const i = asInput(input);
+    const note: AuditNote = {
+      ...(typeof i.account === "string" ? { account: i.account.slice(0, 64) } : {}),
+      ...(typeof i.dataset === "string" ? { dataset: i.dataset.slice(0, 64) } : {}),
+    };
+    const record = (outcome: string) => {
+      try {
+        ctx.db
+          .prepare("INSERT INTO connect_data_audit (at, op, outcome, caller_type, caller_id, product, account_id, dataset, row_count, quarantined) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(Date.now(), op, outcome, ctx.caller.type, ctx.caller.id, note.product ?? null, note.account ?? null, note.dataset ?? null, note.rows ?? 0, note.quarantined ?? 0);
+        ctx.log.info(op, { outcome, caller: ctx.caller.type, app: note.product ?? null, account: note.account ?? null, rows: note.rows ?? 0, quarantined: note.quarantined ?? 0 });
+      } catch (error) {
+        // Not silent: the call itself goes on, the failed audit line is an error in the log.
+        ctx.log.error("data audit line could not be written", { op, error: error instanceof Error ? error.message.slice(0, 120) : "unknown" });
+      }
+    };
+    try {
+      const out = await body(note);
+      record("ok");
+      return out;
+    } catch (error) {
+      record(typeof (error as { code?: unknown }).code === "string" ? String((error as { code: string }).code).slice(0, 64) : "error");
+      throw error;
+    }
+  };
+
   const handlers: Record<string, Handler | HandlerSpec> = {
     // ── agent-audience data ops (apps only; the handler refuses everyone else) ──
-    async data_accounts_list(_input, ctx) {
-      return guard(async () => {
-        const s = services(ctx);
-        const product = dataCaller(ctx);
-        const accounts = (product ? s.shares.forProduct(product) : []).flatMap((share) => {
-          const a = s.accounts.get(share.account);
-          return a?.source === "channel" && a.status === "connected"
-            ? [{ account: a.id, service: a.service, label: a.label, kinds: ["messages"], level: share.level }]
-            : [];
-        });
-        return { accounts } as unknown as Json;
-      });
+    async data_accounts_list(input, ctx) {
+      return audited("data_accounts_list", ctx, input, async (note) =>
+        guard(async () => {
+          const s = services(ctx);
+          const product = dataCaller(ctx);
+          note.product = product;
+          const accounts = (product ? s.shares.forProduct(product) : []).flatMap((share) => {
+            const a = s.accounts.get(share.account);
+            return a?.source === "channel" && a.status === "connected"
+              ? [{ account: a.id, service: a.service, label: a.label, kinds: ["messages"], level: share.level }]
+              : [];
+          });
+          return { accounts } as unknown as Json;
+        }),
+      );
     },
     async data_catalog(input, ctx) {
-      return guard(async () => {
-        const s = services(ctx);
-        const { account, level } = dataAccount(s, ctx, asInput(input).account, "available");
-        const history = messagesDeps(s, ctx).history(account.service);
-        const reports = s.channels.provider(account.service).reports ?? { edits: false, deletions: false };
-        return { account: account.id, service: account.service, label: account.label, level, datasets: [messagesCatalog(ctx.db, account, history, INBOX_RETENTION_MS, reports)], untrusted: true } as unknown as Json;
-      });
+      return audited("data_catalog", ctx, input, async (note) =>
+        guard(async () => {
+          const s = services(ctx);
+          const { account, level } = dataAccount(s, ctx, asInput(input).account, "available", note);
+          note.account = account.id;
+          const history = messagesDeps(s, ctx).history(account.service);
+          const reports = s.channels.provider(account.service).reports ?? { edits: false, deletions: false };
+          return { account: account.id, service: account.service, label: account.label, level, datasets: [messagesCatalog(ctx.db, account, history, INBOX_RETENTION_MS, reports)], untrusted: true } as unknown as Json;
+        }),
+      );
     },
     async data_pull(input, ctx) {
-      return guard(async () => {
-        const s = services(ctx);
-        const i = asInput(input);
-        const { account, product, since: ingestedFrom } = dataAccount(s, ctx, i.account, "shared");
-        if (str(i.dataset) !== MESSAGES_DATASET) fail("not_found", "No such dataset on this account.", 404);
-        const direction = i.direction === "backward" ? "backward" : "forward";
-        const pull: PullInput = {
-          direction,
-          cursor: str(i.cursor) ?? null,
-          since: timeArg(i.since, "since"),
-          until: timeArg(i.until, "until"),
-          ingestedFrom,
-          limit: typeof i.limit === "number" ? i.limit : 100,
-        };
-        const page = pullMessages(messagesDeps(s, ctx), account, pull);
-        // One audit line per pull: who, which account and dataset, how many rows. Never message text.
-        ctx.db
-          .prepare("INSERT INTO connect_data_audit (at, product, account_id, dataset, row_count, quarantined) VALUES (?, ?, ?, ?, ?, ?)")
-          .run(Date.now(), product, account.id, MESSAGES_DATASET, page.rows.length, page.quarantined ?? 0);
-        ctx.log.info("data_pull", { app: product, account: account.id, dataset: MESSAGES_DATASET, rows: page.rows.length, quarantined: page.quarantined ?? 0 });
-        return { ...page, schema: "messages/1", untrusted: true } as unknown as Json;
-      });
+      return audited("data_pull", ctx, input, async (note) =>
+        guard(async () => {
+          const s = services(ctx);
+          const i = asInput(input);
+          const { account, since: ingestedFrom } = dataAccount(s, ctx, i.account, "shared", note);
+          note.account = account.id;
+          if (str(i.dataset) !== MESSAGES_DATASET) fail("not_found", "No such dataset on this account.", 404);
+          const direction = i.direction === "backward" ? "backward" : "forward";
+          const pull: PullInput = {
+            direction,
+            cursor: str(i.cursor) ?? null,
+            since: timeArg(i.since, "since"),
+            until: timeArg(i.until, "until"),
+            ingestedFrom,
+            limit: typeof i.limit === "number" ? i.limit : 100,
+          };
+          const page = pullMessages(messagesDeps(s, ctx), account, pull);
+          note.rows = page.rows.length;
+          note.quarantined = page.quarantined ?? 0;
+          return { ...page, schema: "messages/1", untrusted: true } as unknown as Json;
+        }),
+      );
     },
 
     // ── agent ops ──
@@ -1076,7 +1122,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         .filter((a) => a.source === "channel")
         .map((a) => {
           const bot = s.channels.bot(a.id);
-          return { ...accountView(a), bot: bot ? { id: bot.botId, name: bot.botName, inbound: bot.inboundState, detail: bot.inboundDetail } : null };
+          return { ...accountView(a), bot: bot ? { id: bot.botId, name: bot.botName, inbound: bot.inboundState, detail: bot.inboundDetail, unmatchedChanges: bot.unmatchedChanges } : null };
         });
       return { accounts } as unknown as Json;
     },

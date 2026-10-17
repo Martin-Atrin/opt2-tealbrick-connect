@@ -649,8 +649,10 @@ export const teamsProvider: ChannelProvider = {
       return { conversation: teamsConversationRef(serviceUrl, conversationId) };
     }),
 
-  // R3: edits and deletions are read from messageUpdate / messageDelete activities when Teams sends them.
-  reports: { edits: true, deletions: true },
+  // R3: messageUpdate / messageDelete activities are parsed when Teams sends them, but Teams sends them only in some
+  // installations (the bot needs the read-all permission in a team or chat), so not every edit or delete path is wired:
+  // data_catalog says edits: false, deletions: false and an edit or delete that does not match a logged message is counted.
+  reports: { edits: false, deletions: false },
   inbound: {
     kind: "webhook",
     async verifyWebhook(request, creds, net) {

@@ -364,7 +364,7 @@ test("webhook JWKS: jwks_uri must stay on login.botframework.com; unknown kids r
   assert.equal(t.count("well-known/keys"), 3);
 });
 
-test("R3 webhook: messageUpdate is an edit and messageDelete a deletion of the same message id; the provider reports both", async () => {
+test("R3 webhook: messageUpdate is an edit and messageDelete a deletion of the same message id; the provider claims neither (not every path is wired)", async () => {
   const t = teamsNet();
   const edit = await webhook()(request(jwt(claimsFor(t)), { ...(fixtures.message as object), type: "messageUpdate", text: "please summarise Grace's notes, edited" }), CREDS, t.net, BOT);
   assert.equal(edit.messages.length, 1);
@@ -373,6 +373,7 @@ test("R3 webhook: messageUpdate is an edit and messageDelete a deletion of the s
   assert.match(edit.messages[0]?.text ?? "", /edited/u);
   const del = await webhook()(request(jwt(claimsFor(t)), { ...(fixtures.message as object), type: "messageDelete" }), CREDS, t.net, BOT);
   assert.deepEqual([del.messages[0]?.messageId, del.messages[0]?.conversation, del.messages[0]?.change, del.messages[0]?.text], ["1760241600000", REF, { kind: "delete" }, ""]);
-  assert.deepEqual(teamsProvider.reports, { edits: true, deletions: true });
+  // Teams sends these activities only in some installations, so the provider does not claim edits or deletions
+  assert.deepEqual(teamsProvider.reports, { edits: false, deletions: false });
 });
 
