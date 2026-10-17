@@ -32,7 +32,15 @@ export interface Account {
   status: AccountStatus;
   detail: string;
   /** Chat accounts only (C230 R3): the apps the owner shared this account with. */
-  shares?: { product: string; level: ShareLevel }[];
+  shares?: AppShare[];
+}
+
+export interface AppShare {
+  product: string;
+  level: ShareLevel;
+  /** the owner included the log kept before the share began (30 days) */
+  includeHistory: boolean;
+  setAt: string;
 }
 
 /** R3: what an app may do with a chat account. none = nothing; available = dataset names and counts; shared = pull messages too. */
@@ -62,9 +70,9 @@ export interface BuzzAgentRow {
 export type RelayOutcome = { relay: string; ok: true } | { relay: string; ok: false; error: string; detail: string };
 
 export const servicesSearch = (query: string) => callOp<{ composioKey: boolean; catalogAvailable?: boolean; services: ServiceHit[] }>("services_search", { query });
-export const accountsOverview = () => callOp<{ accounts: Account[]; dataApps?: DataApp[] }>("accounts_overview", {});
-export const accountAppShare = (account: string, product: string, level: ShareLevel) =>
-  callOp<{ account: string; product: string; level: ShareLevel; shares: { product: string; level: ShareLevel }[] }>("account_app_share", { account, product, level });
+export const accountsOverview = () => callOp<{ accounts: Account[]; dataApps?: DataApp[]; dataOpsAvailable?: boolean }>("accounts_overview", {});
+export const accountAppShare = (account: string, product: string, level: ShareLevel, includeHistory: boolean) =>
+  callOp<{ account: string; product: string; level: ShareLevel; shares: AppShare[]; dataOpsAvailable: boolean }>("account_app_share", { account, product, level, includeHistory });
 export const accountConnect = (input: { service: string; label: string; kind: AccountKind; agent?: string }) =>
   callOp<{ account: Account; redirectUrl: string }>("account_connect", input);
 export const catalogAccountConnect = (input: {
