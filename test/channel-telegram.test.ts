@@ -216,7 +216,8 @@ test("telegram: parseTelegramUpdate normalises messages and ignores bots", () =>
     sentAt: 1760000000000,
     mentions: [],
   });
-  assert.equal(parseTelegramUpdate(botMsg, bot, now), null);
+  // R3: another bot is kept and flagged (data apps read it as author kind bot); the bot itself is still ignored.
+  assert.equal(parseTelegramUpdate(botMsg, bot, now)?.senderIsBot, true);
   assert.equal(parseTelegramUpdate(memberUpdate, bot, now), null);
   const post = parseTelegramUpdate(channelPost, bot, now);
   assert.equal(post?.conversationType, "channel");
@@ -253,7 +254,7 @@ test("telegram: poll loop deletes a webhook, advances the offset, backs off on 4
   assert.deepEqual(methods, ["getWebhookInfo", "deleteWebhook", "getUpdates", "getUpdates", "getWebhookInfo", "getUpdates", "getUpdates"]);
   assert.deepEqual(calls[1]?.body, { drop_pending_updates: false });
   const polled = calls.filter((c) => c.path.endsWith("/getUpdates")).map((c) => c.body);
-  assert.deepEqual(polled[0], { timeout: 25, allowed_updates: ["message", "channel_post"] });
+  assert.deepEqual(polled[0], { timeout: 25, allowed_updates: ["message", "channel_post", "edited_message", "edited_channel_post"] });
   assert.equal(polled[1]?.offset, 727300106, "offset = last update_id + 1 (ignored updates count too)");
   assert.equal(polled[2]?.offset, 727300106);
   assert.equal(polled[3]?.offset, 727300107);
@@ -263,6 +264,7 @@ test("telegram: poll loop deletes a webhook, advances the offset, backs off on 4
     got.map((m) => [m.conversation, m.messageId, m.text]),
     [
       ["5550001", "41", "hello bot!"],
+      [String(updates.batch1.result[1].message.chat.id), String(updates.batch1.result[1].message.message_id), String(updates.batch1.result[1].message.text)],
       ["-1009876543210", "9", "Release 1.2 is out"],
       ["-1001234567890", "120", "see the chart\n[photo]"],
       ["5550001", "43", "[file: report.pdf]"],
@@ -314,4 +316,17 @@ test("telegram: an already aborted signal returns without polling", async () => 
   if (telegramProvider.inbound.kind !== "poll") throw new Error("expected poll");
   await telegramProvider.inbound.run(creds, net, bot, () => {}, controller.signal);
   assert.equal(calls.length, 0);
+});
+
+test("R3 telegram: edited_message and edited_channel_post become edits (with edit_date); no edit_date is ignored; Telegram reports no deletions", () => {
+  const base = { message_id: 41, date: 1_760_000_000, chat: { id: 5550001, type: "private" }, from: { id: 5550001, first_name: "Ada" }, text: "hello, edited" };
+  const edit = parseTelegramUpdate({ update_id: 9, edited_message: { ...base, edit_date: 1_760_000_100 } }, bot, 5);
+  assert.deepEqual(edit?.change, { kind: "edit", at: 1_760_000_100_000 });
+  assert.equal(edit?.messageId, "41");
+  assert.equal(edit?.text, "hello, edited");
+  const post = parseTelegramUpdate({ update_id: 10, edited_channel_post: { ...base, chat: { id: -1009876543210, type: "channel" }, from: undefined, sender_chat: { id: -1009876543210, title: "Announcements" }, edit_date: 1_760_000_200 } }, bot, 5);
+  assert.deepEqual(post?.change, { kind: "edit", at: 1_760_000_200_000 });
+  assert.equal(parseTelegramUpdate({ update_id: 11, edited_message: base }, bot, 5), null);
+  assert.equal(parseTelegramUpdate({ update_id: 12, message: base }, bot, 5)?.change, undefined);
+  assert.deepEqual(telegramProvider.reports, { edits: true, deletions: false });
 });

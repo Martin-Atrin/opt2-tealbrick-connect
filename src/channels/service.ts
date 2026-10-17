@@ -179,11 +179,18 @@ export class ChannelHub {
   ingest(account: Account, m: InboundMessage): boolean {
     const own = this.#d.db.prepare("SELECT 1 FROM connect_channel_sent WHERE account_id = ? AND conversation = ? AND message_id = ?").get(account.id, m.conversation, m.messageId);
     if (own) return false;
+    // R3: a reported deletion or edit of a message that is already logged changes that row (it takes a new `rev`).
+    // An edit of a message Connect never logged is stored as a new row; a deletion of one is dropped.
+    if (m.change?.kind === "delete") {
+      this.markDeleted(account.id, m.conversation, m.messageId);
+      return false;
+    }
+    if (m.change?.kind === "edit" && this.markEdited(account.id, m.conversation, m.messageId, m.text, m.change.at)) return false;
     this.#rememberConversation(account.id, m.conversation, m.conversationName ?? m.conversation, m.conversationType);
     const r = this.#d.db
       .prepare(
-        `INSERT OR IGNORE INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, thread_id, sender_id, sender_name, text, sent_at, received_at, mentions, rev, attachments)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, thread_id, sender_id, sender_name, text, sent_at, received_at, mentions, rev, attachments, edited_at, sender_is_bot)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         account.id,
@@ -197,32 +204,41 @@ export class ChannelHub {
         m.sentAt,
         Date.now(),
         JSON.stringify(m.mentions ?? []),
-        this.#nextRev(),
+        this.#nextRev(account.id),
         m.attachments && m.attachments.length > 0 ? JSON.stringify(m.attachments.slice(0, 32)) : null,
+        m.change?.kind === "edit" ? m.change.at : null,
+        m.senderIsBot ? 1 : 0,
       );
     return r.changes > 0;
   }
 
-  /** R3: the next change number of the `messages` dataset (monotonic; a duplicate message wastes one, which is harmless). */
-  #nextRev(): number {
-    const id = Number(this.#d.db.prepare("INSERT INTO connect_inbox_rev DEFAULT VALUES").run().lastInsertRowid);
-    this.#d.db.prepare("DELETE FROM connect_inbox_rev WHERE id < ?").run(id);
-    return id;
+  /** R3: the next change number of this account's `messages` dataset (a per-account sequence; a duplicate message wastes one). */
+  #nextRev(accountId: string): number {
+    this.#d.db
+      .prepare("INSERT INTO connect_account_rev (account_id, last) VALUES (?, 1) ON CONFLICT (account_id) DO UPDATE SET last = last + 1")
+      .run(accountId);
+    return Number(this.#d.db.prepare("SELECT last FROM connect_account_rev WHERE account_id = ?").get(accountId)?.last);
+  }
+
+  #live(accountId: string, conversation: string, messageId: string): boolean {
+    return !!this.#d.db.prepare("SELECT 1 FROM connect_channel_inbox WHERE account_id = ? AND conversation = ? AND message_id = ? AND deleted = 0").get(accountId, conversation, messageId);
   }
 
   /** R3: the provider deleted a message. The stored text and attachments are erased; the row takes a new `rev` so pulls see it. */
   markDeleted(accountId: string, conversation: string, messageId: string): boolean {
+    if (!this.#live(accountId, conversation, messageId)) return false;
     const r = this.#d.db
       .prepare("UPDATE connect_channel_inbox SET text = '', attachments = NULL, deleted = 1, rev = ? WHERE account_id = ? AND conversation = ? AND message_id = ? AND deleted = 0")
-      .run(this.#nextRev(), accountId, conversation, messageId);
+      .run(this.#nextRev(accountId), accountId, conversation, messageId);
     return r.changes > 0;
   }
 
   /** R3: the provider edited a message. */
   markEdited(accountId: string, conversation: string, messageId: string, text: string, editedAt: number): boolean {
+    if (!this.#live(accountId, conversation, messageId)) return false;
     const r = this.#d.db
       .prepare("UPDATE connect_channel_inbox SET text = ?, edited_at = ?, rev = ? WHERE account_id = ? AND conversation = ? AND message_id = ? AND deleted = 0")
-      .run(text, editedAt, this.#nextRev(), accountId, conversation, messageId);
+      .run(text, editedAt, this.#nextRev(accountId), accountId, conversation, messageId);
     return r.changes > 0;
   }
 
@@ -232,7 +248,7 @@ export class ChannelHub {
     const rows = this.#d.db
       .prepare(
         `SELECT i.*, a.service FROM connect_channel_inbox i JOIN connect_accounts a ON a.id = i.account_id
-         WHERE i.account_id IN (${placeholders}) AND i.seq > ? AND i.deleted = 0 ORDER BY i.seq LIMIT ?`,
+         WHERE i.account_id IN (${placeholders}) AND i.seq > ? AND i.deleted = 0 AND i.sender_is_bot = 0 ORDER BY i.seq LIMIT ?`,
       )
       .all(...accountIds, sinceSeq, Math.max(1, Math.min(limit, 100)));
     const botIds = new Map(accountIds.map((id) => [id, this.bot(id)?.botId.toLowerCase() ?? null]));
@@ -292,7 +308,7 @@ export class ChannelHub {
     if (contact) return String(contact.conversation);
     // A person who wrote to the bot in a direct conversation is not a first contact.
     const wrote = this.#d.db
-      .prepare("SELECT conversation FROM connect_channel_inbox WHERE account_id = ? AND sender_id = ? AND conversation_type = 'direct' ORDER BY seq DESC LIMIT 1")
+      .prepare("SELECT conversation FROM connect_channel_inbox WHERE account_id = ? AND sender_id = ? AND conversation_type = 'direct' AND sender_is_bot = 0 ORDER BY seq DESC LIMIT 1")
       .get(account.id, personId);
     return wrote ? String(wrote.conversation) : null;
   }
@@ -308,7 +324,7 @@ export class ChannelHub {
     const provider = this.provider(account.service);
     const known = this.#d.db.prepare("SELECT type FROM connect_channel_conversations WHERE account_id = ? AND conversation = ?").get(account.id, input.conversation);
     if (known?.type === "direct") {
-      const wrote = this.#d.db.prepare("SELECT 1 FROM connect_channel_inbox WHERE account_id = ? AND conversation = ? LIMIT 1").get(account.id, input.conversation);
+      const wrote = this.#d.db.prepare("SELECT 1 FROM connect_channel_inbox WHERE account_id = ? AND conversation = ? AND sender_is_bot = 0 LIMIT 1").get(account.id, input.conversation);
       const contact = this.#d.db.prepare("SELECT 1 FROM connect_channel_contacts WHERE account_id = ? AND conversation = ?").get(account.id, input.conversation);
       if (!wrote && !contact) throw new ChannelError("channel_first_contact_required", "This is a direct conversation with someone you have not written to. Use channel_dm_first.", 409);
     }

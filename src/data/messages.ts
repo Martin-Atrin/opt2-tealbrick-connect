@@ -11,6 +11,10 @@
  * What Connect can read today: the inbound log of Slack, Teams, Telegram and Discord (kept INBOX_RETENTION_MS = 30 days,
  * the minimum for apps is 7 days). No provider has a history reader yet, so `history` is false and a backward pull
  * answers `exhausted: true`; a service whose provider sets `readsHistory` pages backward through the log.
+ *
+ * `rev` is a per-account sequence and a cursor names its account (`m2:<account>:<rev>`): a cursor shows nothing about
+ * other accounts' traffic and is refused on another account. A stored row that does not conform to messages/1 is
+ * quarantined: skipped, counted (`quarantined` on the answer), logged with its rev, and the page stays valid.
  */
 import { createHash } from "node:crypto";
 import { HANDLE_CHANNELS, normalizeHandle, validateAgainstSchema } from "@opt2-tealbrick/manifest";
@@ -63,6 +67,8 @@ export interface PullInput {
   since: number | null;
   /** exclusive upper bound on `sentAt`, epoch ms */
   until: number | null;
+  /** only rows Connect received at or after this time, epoch ms (the share's start); null = the whole log */
+  ingestedFrom: number | null;
   limit: number;
 }
 
@@ -87,6 +93,8 @@ export interface MessagesPage {
   anchor?: string;
   exhausted: boolean;
   retryAfterS?: number;
+  /** extra member (the contract allows them): stored rows skipped because they did not conform to messages/1 */
+  quarantined?: number;
 }
 
 interface LogRow {
@@ -102,6 +110,7 @@ interface LogRow {
   editedAt: number | null;
   deleted: boolean;
   attachments: string | null;
+  senderIsBot: boolean;
 }
 
 /** Where the rows come from. Production: the inbound log. A provider history reader (later) or a test replaces it. */
@@ -120,14 +129,15 @@ export interface MessagesDeps {
 
 // ── cursors ──
 
-export function encodeCursor(rev: number): string {
-  return Buffer.from(`m1:${rev}`).toString("base64url");
+export function encodeCursor(account: string, rev: number): string {
+  return Buffer.from(`m2:${account}:${rev}`).toString("base64url");
 }
 
-export function decodeCursor(cursor: string): number {
-  const match = /^m1:(\d{1,15})$/u.exec(Buffer.from(cursor, "base64url").toString("utf8"));
-  if (!match || cursor.length > 512) throw new DataError("cursor_invalid", "cursor is not one data_pull returned for this dataset.");
-  return Number(match[1]);
+export function decodeCursor(cursor: string, account: string): number {
+  const decoded = cursor.length > 512 ? "" : Buffer.from(cursor, "base64url").toString("utf8");
+  const match = /^m2:([A-Za-z0-9_-]{1,64}):(\d{1,15})$/u.exec(decoded);
+  if (!match || match[1] !== account) throw new DataError("cursor_invalid", "cursor is not one data_pull returned for this account and dataset.");
+  return Number(match[2]);
 }
 
 // ── rows ──
@@ -191,7 +201,9 @@ function attachmentsOf(raw: string | null): { list: MessageRow["attachments"]; t
 export function toRow(service: string, botId: string | null, r: LogRow, log?: Logger): MessageRow {
   const mine = botId !== null && r.senderId.toLowerCase() === botId.toLowerCase();
   const display = clipChars(r.senderName.replace(CONTROL, "").trim(), 128);
-  const author: MessageRow["author"] = { kind: mine ? "self" : "person", handle: authorHandle(service, r.senderId, log), ...(display ? { display } : {}) };
+  const kind = mine ? "self" : r.senderIsBot ? "bot" : "person";
+  // A bot's id is not always a user id (a Slack bot id): its raw handle is expected, so no warning.
+  const author: MessageRow["author"] = { kind, handle: authorHandle(service, r.senderId, r.senderIsBot ? undefined : log), ...(display ? { display } : {}) };
   const base = {
     id: fit(r.messageId),
     conversation: fit(r.conversation),
@@ -224,6 +236,7 @@ function logRow(r: Record<string, unknown>): LogRow {
     editedAt: r.edited_at === null || r.edited_at === undefined ? null : Number(r.edited_at),
     deleted: Number(r.deleted) === 1,
     attachments: r.attachments === null || r.attachments === undefined ? null : String(r.attachments),
+    senderIsBot: Number(r.sender_is_bot) === 1,
   };
 }
 
@@ -233,7 +246,11 @@ export function readLog(db: Db): ReadRows {
     const params: unknown[] = [accountId];
     if (input.cursor !== null) {
       where.push(input.direction === "forward" ? "rev > ?" : "rev < ?");
-      params.push(decodeCursor(input.cursor));
+      params.push(decodeCursor(input.cursor, accountId));
+    }
+    if (input.ingestedFrom !== null) {
+      where.push("received_at >= ?");
+      params.push(input.ingestedFrom);
     }
     if (input.since !== null) {
       where.push("sent_at >= ?");
@@ -251,8 +268,10 @@ export function readLog(db: Db): ReadRows {
   };
 }
 
-function headRev(db: Db, accountId: string): number | null {
-  const r = db.prepare("SELECT MAX(rev) AS rev FROM connect_channel_inbox WHERE account_id = ?").get(accountId);
+function headRev(db: Db, accountId: string, ingestedFrom: number | null): number | null {
+  const r = db
+    .prepare(`SELECT MAX(rev) AS rev FROM connect_channel_inbox WHERE account_id = ?${ingestedFrom === null ? "" : " AND received_at >= ?"}`)
+    .get(...(ingestedFrom === null ? [accountId] : [accountId, ingestedFrom]));
   return r?.rev === null || r?.rev === undefined ? null : Number(r.rev);
 }
 
@@ -273,12 +292,14 @@ export function assertConforms(page: MessagesPage, log?: Logger): void {
 
 // ── pull ──
 
+const rowSchema = { $schema: messagesSchema.$schema, $defs: messagesSchema.$defs, $ref: "#/$defs/row" } as unknown as JsonSchemaObject;
+
 export function pullMessages(deps: MessagesDeps, account: Account, input: PullInput): MessagesPage {
   const limit = Math.max(1, Math.min(PAGE_MAX_ROWS, Math.trunc(input.limit) || PAGE_DEFAULT_ROWS));
   const cursor = input.cursor;
-  if (cursor !== null) decodeCursor(cursor);
-  const anchorRev = cursor === null ? headRev(deps.db, account.id) : null;
-  const anchor = anchorRev === null ? {} : { anchor: encodeCursor(anchorRev) };
+  if (cursor !== null) decodeCursor(cursor, account.id);
+  const anchorRev = cursor === null ? headRev(deps.db, account.id, input.ingestedFrom) : null;
+  const anchor = anchorRev === null ? {} : { anchor: encodeCursor(account.id, anchorRev) };
 
   let page: MessagesPage;
   if (input.direction === "backward" && !deps.history(account.service)) {
@@ -298,18 +319,38 @@ export function pullMessages(deps: MessagesDeps, account: Account, input: PullIn
     const rows: MessageRow[] = [];
     let used = 0;
     let lastRev: number | null = null;
+    let quarantined = 0;
+    let taken = 0;
     for (const r of fetched.slice(0, limit)) {
-      const row = toRow(account.service, botId, r, deps.log);
-      const size = Buffer.byteLength(JSON.stringify(row)) + 1;
-      if (rows.length > 0 && used + size > ROW_BUDGET_BYTES) break;
-      rows.push(row);
-      used += size;
+      const quarantine = (why: string) => {
+        quarantined += 1;
+        // Rev, account and the rule that failed only: the row's values are untrusted message content.
+        deps.log?.error("data_pull: a stored row does not conform to messages/1 and was skipped", { account: account.id, rev: r.rev, why: why.slice(0, 200) });
+      };
+      let row: MessageRow | null = null;
+      try {
+        row = toRow(account.service, botId, r, deps.log);
+        const checked = validateAgainstSchema(rowSchema, row as unknown as Json);
+        if (!checked.ok) {
+          quarantine(checked.errors.slice(0, 3).map((e) => `${e.path || "/"} ${e.message}`).join("; "));
+          row = null;
+        }
+      } catch (error) {
+        quarantine(error instanceof Error ? error.message : "row could not be built");
+      }
+      if (row) {
+        const size = Buffer.byteLength(JSON.stringify(row)) + 1;
+        if (rows.length > 0 && used + size > ROW_BUDGET_BYTES) break;
+        rows.push(row);
+        used += size;
+      }
       lastRev = r.rev;
+      taken += 1;
     }
-    const exhausted = rows.length === fetched.length;
+    const exhausted = taken === fetched.length;
     // Forward keeps a cursor even when exhausted (the caller polls for newer rows from it); backward ends with null.
-    const next = lastRev !== null ? encodeCursor(lastRev) : cursor;
-    page = { rows, nextCursor: input.direction === "backward" && exhausted ? null : next, ...anchor, exhausted };
+    const next = lastRev !== null ? encodeCursor(account.id, lastRev) : cursor;
+    page = { rows, nextCursor: input.direction === "backward" && exhausted ? null : next, ...anchor, exhausted, ...(quarantined > 0 ? { quarantined } : {}) };
   }
   assertConforms(page, deps.log);
   return page;
@@ -328,11 +369,15 @@ export interface CatalogDataset {
   history: boolean;
   /** how long the log keeps rows, days */
   retentionDays: number;
+  /** true when the provider reports edits of logged messages (otherwise the log keeps the old text) */
+  edits: boolean;
+  /** true when the provider reports deletions (otherwise a deleted message keeps its text until the purge) */
+  deletions: boolean;
   oldestAt?: string;
   conversations: { id: string; name: string; type: string; approxRows: number }[];
 }
 
-export function messagesCatalog(db: Db, account: Account, history: boolean, retentionMs: number): CatalogDataset {
+export function messagesCatalog(db: Db, account: Account, history: boolean, retentionMs: number, reports: { edits: boolean; deletions: boolean }): CatalogDataset {
   const total = db.prepare("SELECT COUNT(*) AS n, MIN(sent_at) AS oldest FROM connect_channel_inbox WHERE account_id = ? AND rev IS NOT NULL").get(account.id);
   const conversations = db
     .prepare(
@@ -357,6 +402,8 @@ export function messagesCatalog(db: Db, account: Account, history: boolean, rete
     approxRows: Number(total?.n ?? 0),
     history,
     retentionDays: Math.round(retentionMs / 86_400_000),
+    edits: reports.edits,
+    deletions: reports.deletions,
     ...(oldest !== null ? { oldestAt: isoOf(oldest, oldest) } : {}),
     conversations,
   };

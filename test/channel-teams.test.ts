@@ -277,7 +277,11 @@ test("webhook: conversationUpdate and bot senders carry no messages", async () =
   const update = await webhook()(request(jwt(claimsFor(t)), fixtures.conversationUpdate), CREDS, t.net, BOT);
   assert.deepEqual(update, { messages: [], reply: { status: 200, body: "" } });
   const fromBot = { ...fixtures.message, from: { id: "28:99999999-0000-0000-0000-000000000000", name: "Other bot" } };
-  assert.deepEqual((await webhook()(request(jwt(claimsFor(t)), fromBot), CREDS, t.net, BOT)).messages, []);
+  // R3: another bot is kept and flagged (data apps read it as author kind bot); the bot itself is still ignored.
+  const bots = (await webhook()(request(jwt(claimsFor(t)), fromBot), CREDS, t.net, BOT)).messages;
+  assert.deepEqual(bots.map((m) => m.senderIsBot), [true]);
+  const own = { ...fixtures.message, from: { id: BOT.botId, name: "Teams bot" } };
+  assert.deepEqual((await webhook()(request(jwt(claimsFor(t)), own), CREDS, t.net, BOT)).messages, []);
   const personal = {
     ...fixtures.message,
     id: "1760241600001",
@@ -359,3 +363,16 @@ test("webhook JWKS: jwks_uri must stay on login.botframework.com; unknown kids r
   assert.equal(out.messages.length, 1);
   assert.equal(t.count("well-known/keys"), 3);
 });
+
+test("R3 webhook: messageUpdate is an edit and messageDelete a deletion of the same message id; the provider reports both", async () => {
+  const t = teamsNet();
+  const edit = await webhook()(request(jwt(claimsFor(t)), { ...(fixtures.message as object), type: "messageUpdate", text: "please summarise Grace's notes, edited" }), CREDS, t.net, BOT);
+  assert.equal(edit.messages.length, 1);
+  assert.equal(edit.messages[0]?.messageId, "1760241600000");
+  assert.equal(edit.messages[0]?.change?.kind, "edit");
+  assert.match(edit.messages[0]?.text ?? "", /edited/u);
+  const del = await webhook()(request(jwt(claimsFor(t)), { ...(fixtures.message as object), type: "messageDelete" }), CREDS, t.net, BOT);
+  assert.deepEqual([del.messages[0]?.messageId, del.messages[0]?.conversation, del.messages[0]?.change, del.messages[0]?.text], ["1760241600000", REF, { kind: "delete" }, ""]);
+  assert.deepEqual(teamsProvider.reports, { edits: true, deletions: true });
+});
+

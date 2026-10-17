@@ -288,6 +288,19 @@ test("socket mode: hello, ack every envelope, messages to the sink, filters, ded
       mentions: ["U0BOTUSER1"],
     },
     {
+      // R3: another bot's message is kept, flagged; the hub never lists it for agents and apps see author kind bot
+      conversation: "C0GENERAL1",
+      conversationType: "channel",
+      messageId: "1700000201.000100",
+      threadId: null,
+      senderId: "B0OTHERBOT",
+      senderName: "B0OTHERBOT",
+      text: "beep",
+      sentAt: 1_700_000_201_000,
+      mentions: [],
+      senderIsBot: true,
+    },
+    {
       conversation: "D0DIRECT01",
       conversationType: "direct",
       messageId: "1700000300.000300",
@@ -309,7 +322,7 @@ test("socket mode: hello, ack every envelope, messages to the sink, filters, ded
   const second = sockets[1] as FakeSocket;
   second.emit(envelopes.hello);
   second.emit(envelopes.message);
-  assert.equal(received.length, 2);
+  assert.equal(received.length, 3);
 
   // a dropped socket: capped, jittered backoff before the next open
   second.drop();
@@ -347,4 +360,48 @@ test("socket mode: transient open failures back off and retry; abort during back
   assert.equal(sleeps.length, 2);
   assert.ok((sleeps[1] ?? 0) > (sleeps[0] ?? 0) / 2, "backoff grows");
   for (const ms of sleeps) assert.ok(ms <= 60_000);
+});
+
+test("R3 socket mode: an edit (message_changed with edited) and a deletion reach the sink as changes; the same ts is not deduped away; an unedited change is ignored", async () => {
+  const { net, sockets } = slackNet({ "apps.connections.open": { body: api["apps.connections.open"] } });
+  if (slackProvider.inbound.kind !== "socket") assert.fail("slack inbound is socket");
+  const received: InboundMessage[] = [];
+  const abort = new AbortController();
+  const running = slackProvider.inbound.run(CREDS, net, BOT, (m) => received.push(m), abort.signal);
+  await until(() => sockets.length === 1, "first socket");
+  const socket = sockets[0] as FakeSocket;
+  const wrap = (n: number, event: Record<string, unknown>) => ({
+    envelope_id: `env-r3-${n}`,
+    type: "events_api",
+    payload: { team_id: "T0TESTTEAM", type: "event_callback", event_id: `Ev0R3EVENT${n}`, event_time: 1_700_000_300 + n, event },
+  });
+  const original = { type: "message", channel: "C0GENERAL1", user: "U0HUMAN001", text: "first", ts: "1700000200.000100", channel_type: "channel" };
+  socket.emit(envelopes.hello);
+  socket.emit(wrap(1, original));
+  socket.emit(wrap(2, { type: "message", subtype: "message_changed", channel: "C0GENERAL1", channel_type: "channel", message: { ...original, text: "first, edited", edited: { user: "U0HUMAN001", ts: "1700000260.000200" } } }));
+  socket.emit(wrap(3, { type: "message", subtype: "message_changed", channel: "C0GENERAL1", hidden: true, message: { ...original, text: "unfurl only" } }));
+  socket.emit(wrap(4, { type: "message", subtype: "message_deleted", channel: "C0GENERAL1", deleted_ts: "1700000200.000100", previous_message: original }));
+  assert.deepEqual(
+    received.map((m) => [m.messageId, m.text, m.change]),
+    [
+      ["1700000200.000100", "first", undefined],
+      ["1700000200.000100", "first, edited", { kind: "edit", at: 1_700_000_260_000 }],
+      ["1700000200.000100", "", { kind: "delete" }],
+    ],
+  );
+  assert.equal(received[2]?.conversation, "C0GENERAL1");
+  abort.abort();
+  await running;
+});
+
+test("R3 slack parser: another app's message carries senderIsBot; the bot's own edit and delete are ignored; the provider reports edits and deletions", async () => {
+  const { parseSlackEvent } = await import("../src/channels/providers/slack.ts");
+  const event = (e: Record<string, unknown>) => ({ type: "event_callback", team_id: "T0TESTTEAM", event_id: "Ev0PARSER01", event: { type: "message", channel: "C0GENERAL1", ts: "1700000200.000100", ...e } });
+  const withUserBot = parseSlackEvent(event({ user: "U0APPUSER1", bot_id: "B0APP00001", text: "from an app" }), BOT, () => 1);
+  assert.equal(withUserBot?.message.senderIsBot, true);
+  assert.equal(withUserBot?.message.senderId, "U0APPUSER1");
+  assert.equal(parseSlackEvent(event({ user: "U0HUMAN001", text: "hi" }), BOT, () => 1)?.message.senderIsBot, undefined);
+  assert.equal(parseSlackEvent(event({ subtype: "message_deleted", deleted_ts: "1700000100.000100", previous_message: { user: BOT.botId } }), BOT, () => 1), null);
+  assert.equal(parseSlackEvent(event({ subtype: "message_changed", message: { user: BOT.botId, text: "x", ts: "1700000100.000100", edited: { ts: "1700000150.000100" } } }), BOT, () => 1), null);
+  assert.deepEqual(slackProvider.reports, { edits: true, deletions: true });
 });

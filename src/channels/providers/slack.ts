@@ -42,6 +42,7 @@ const BOT_TOKEN = /^xoxb-[A-Za-z0-9-]{10,250}$/u;
 const APP_TOKEN = /^xapp-[A-Za-z0-9-]{10,250}$/u;
 const CONVERSATION_ID = /^[CGD][A-Z0-9]{2,30}$/u;
 const USER_ID = /^[UW][A-Z0-9]{2,30}$/u;
+const BOT_ID = /^B[A-Z0-9]{2,30}$/u;
 const TEAM_ID = /^[TE][A-Z0-9]{2,30}$/u;
 const TS = /^[0-9]{1,12}\.[0-9]{1,8}$/u;
 const EVENT_ID = /^Ev[A-Za-z0-9]{2,40}$/u;
@@ -273,27 +274,53 @@ async function slackCall(
 
 // ---------------------------------------------------------------- Socket Mode
 
-/** Normalises one Socket Mode `events_api` payload, or returns null for anything the agent must not see. */
+/**
+ * Normalises one Socket Mode `events_api` payload, or returns null for anything the agent must not see.
+ * R3: another bot's message is returned with `senderIsBot` (the hub keeps it for data apps only); an edit
+ * (`message_changed`, only when Slack marks the inner message `edited`) carries `change: edit`; a `message_deleted`
+ * carries `change: delete` (conversation and message id only).
+ */
 export function parseSlackEvent(payload: unknown, bot: BotIdentity, now: () => number): { eventId: string; message: InboundMessage } | null {
   const record = asRecord(payload);
   if (record?.type !== "event_callback") return null;
   if (typeof bot.workspace !== "string" || !TEAM_ID.test(bot.workspace) || record.team_id !== bot.workspace) return null;
   const eventId = record.event_id;
-  const event = asRecord(record.event);
-  if (typeof eventId !== "string" || !EVENT_ID.test(eventId) || !event) return null;
-  if (event.type !== "message" && event.type !== "app_mention") return null;
+  const outer = asRecord(record.event);
+  if (typeof eventId !== "string" || !EVENT_ID.test(eventId) || !outer) return null;
+  if (outer.type !== "message" && outer.type !== "app_mention") return null;
+  const outerChannel = outer.channel;
+  if (outer.subtype === "message_deleted") {
+    const deletedTs = outer.deleted_ts;
+    if (typeof outerChannel !== "string" || !CONVERSATION_ID.test(outerChannel) || typeof deletedTs !== "string" || !TS.test(deletedTs)) return null;
+    const previous = asRecord(outer.previous_message);
+    if (previous?.user === bot.botId) return null;
+    return {
+      eventId,
+      message: { conversation: outerChannel, conversationType: "channel", messageId: deletedTs, threadId: null, senderId: "", senderName: "", text: "", sentAt: now(), change: { kind: "delete" } },
+    };
+  }
+  let event = outer;
+  let edit: { kind: "edit"; at: number } | undefined;
+  if (outer.subtype === "message_changed") {
+    const inner = asRecord(outer.message);
+    const editedTs = Number(asRecord(inner?.edited)?.ts);
+    if (!inner || !Number.isFinite(editedTs) || editedTs <= 0) return null;
+    event = { ...inner, type: "message", channel: outer.channel, channel_type: outer.channel_type };
+    edit = { kind: "edit", at: Math.round(editedTs * 1000) };
+  }
   const subtype = event.subtype;
-  if (subtype === "bot_message" || (typeof event.bot_id === "string" && event.bot_id.length > 0)) return null;
+  const botSender = subtype === "bot_message" || (typeof event.bot_id === "string" && event.bot_id.length > 0);
   // Edits (message_changed), deletes (message_deleted), joins and the rest are not new messages.
-  if (subtype !== undefined && subtype !== "thread_broadcast" && subtype !== "file_share") return null;
-  const { channel, ts, user } = event;
+  if (subtype !== undefined && subtype !== "thread_broadcast" && subtype !== "file_share" && subtype !== "bot_message") return null;
+  const { channel, ts } = event;
   if (typeof channel !== "string" || !CONVERSATION_ID.test(channel) || typeof ts !== "string" || !TS.test(ts)) return null;
-  if (typeof user !== "string" || !USER_ID.test(user) || user === bot.botId) return null;
+  const user = typeof event.user === "string" && event.user.length > 0 ? event.user : event.bot_id;
+  if (typeof user !== "string" || !(USER_ID.test(user) || (botSender && BOT_ID.test(user))) || user === bot.botId) return null;
   const threadTs = typeof event.thread_ts === "string" && TS.test(event.thread_ts) && event.thread_ts !== ts ? event.thread_ts : null;
   const channelType = event.channel_type;
   const conversationType = channelType === "im" || (channelType === undefined && channel.startsWith("D")) ? "direct" : channelType === "mpim" ? "group" : "channel";
   const profile = asRecord(event.user_profile) ?? {};
-  const senderName = shortText(profile.display_name, 80) || shortText(profile.real_name, 80) || shortText(profile.name, 80) || user;
+  const senderName = shortText(profile.display_name, 80) || shortText(profile.real_name, 80) || shortText(profile.name, 80) || shortText(event.username, 80) || user;
   const raw = typeof event.text === "string" ? event.text : "";
   // The bot's own mention token is addressing, not content.
   const text = cleanInboundText(decodeSlackText(raw.split(`<@${bot.botId}>`).join("")).trim());
@@ -313,6 +340,8 @@ export function parseSlackEvent(payload: unknown, bot: BotIdentity, now: () => n
       text,
       sentAt: Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : now(),
       mentions: mentionList(mentioned),
+      ...(edit ? { change: edit } : {}),
+      ...(botSender ? { senderIsBot: true as const } : {}),
     },
   };
 }
@@ -388,7 +417,10 @@ function runSocket(
         if (!parsed) return;
         // event_id stops Slack's retries; channel:ts stops the `message` + `app_mention` pair of one mention.
         const eventFresh = dedupe.firstSeen(`event:${parsed.eventId}`);
-        const messageFresh = dedupe.firstSeen(`message:${parsed.message.conversation}:${parsed.message.messageId}`);
+        // An edit or a deletion of a message is a different event from the message itself (R3).
+        const change = parsed.message.change;
+        const kind = change ? (change.kind === "edit" ? `edit:${change.at}` : "delete") : "message";
+        const messageFresh = dedupe.firstSeen(`${kind}:${parsed.message.conversation}:${parsed.message.messageId}`);
         if (!eventFresh || !messageFresh) return;
         try {
           sink(parsed.message);
@@ -580,6 +612,8 @@ export const slackProvider: ChannelProvider = {
       return { conversation: id };
     }),
 
+  // R3: message_changed / message_deleted are read.
+  reports: { edits: true, deletions: true },
   inbound: {
     kind: "socket",
     run: (creds, net, bot, sink, signal) => withScrub(creds, () => runSocketMode(creds, net, bot, sink, signal)),

@@ -68,6 +68,13 @@ export interface InboundMessage {
   mentions?: string[];
   /** R3: attachment metadata only (name, mime type, size); no provider fills it yet. At most 32 are kept. */
   attachments?: { name: string; mime: string; bytes: number }[];
+  /**
+   * R3: the provider reports an edit (new text, `at` = edit time, epoch ms) or a deletion of an earlier message. Absent
+   * means a new message. A deletion carries only the conversation and the message id (the other fields are ignored).
+   */
+  change?: { kind: "edit"; at: number } | { kind: "delete" };
+  /** R3: the sender is another bot (the provider says so). Such rows are kept for data apps (author kind "bot") and never reach agents. */
+  senderIsBot?: true;
 }
 
 /** De-duplicated, bounded mention id list (F15). */
@@ -97,6 +104,11 @@ export interface ChannelProvider {
    * INBOX_RETENTION_MS) is the only record and is read forward.
    */
   readsHistory?: boolean;
+  /**
+   * R3: which inbound events the provider reports for messages Connect already logged. `edits` / `deletions` false or
+   * absent means the log keeps the old text (a deleted message stays until the 30-day purge) and data_catalog says so.
+   */
+  reports?: { edits: boolean; deletions: boolean };
   /** Check the credentials and return the bot identity (Slack auth.test, Telegram getMe, Discord /users/@me, Teams token + app id). */
   verify(creds: ChannelCredentials, net: ChannelNet): Promise<BotIdentity>;
   /** Conversations the bot can post to (bounded list, ≤ 200). */

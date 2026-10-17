@@ -16,9 +16,12 @@ import type { Json, Logger } from "@opt2-tealbrick/spec/sdk";
 import { AccountStore } from "../src/accounts.ts";
 import { createConnectApp } from "../src/app.ts";
 import type { ChannelNet, ChannelProvider, ChannelService, InboundMessage, InboundSink } from "../src/channels/provider.ts";
+import { parseDiscordDeletes, parseDiscordMessage, parseDiscordUpdate } from "../src/channels/providers/discord.ts";
+import { parseSlackEvent } from "../src/channels/providers/slack.ts";
+import { parseTelegramUpdate } from "../src/channels/providers/telegram.ts";
 import { ChannelHub, INBOX_RETENTION_MS } from "../src/channels/service.ts";
-import { DATA_APPS } from "../src/data/apps.ts";
 import { encodeCursor, pullMessages, RetryLater } from "../src/data/messages.ts";
+import { DATA_APPS } from "../src/data/shares.ts";
 import { eventCtx, handlerOf, memorySecrets, root, testCtx, testDb } from "./helpers.ts";
 
 const manifest = JSON.parse(readFileSync(join(root, "tealbrick.manifest.json"), "utf8")) as Manifest;
@@ -26,7 +29,10 @@ const schema = JSON.parse(readFileSync(join(root, "test", "contracts", "messages
 const AGENT = "agt_01DATAAGENT000000000000000";
 const KNOWLEDGE = "ins_01KNOWLEDGE00000000000000";
 const OBSERVER = "ins_01OBSERVER0000000000000000";
+const ROGUE = "ins_01ROGUE00000000000000000000";
 const T0 = 1_760_000_000_000;
+/** The test-only seam: instance id → the product the SDK would have verified (SDK-CALLER-PRODUCT, not yet in the SDK). */
+const VERIFIED: Record<string, string> = { [KNOWLEDGE]: "knowledge", [OBSERVER]: "observer" };
 
 type Row = { id: string; conversation: string; thread?: string; sentAt: string; editedAt?: string; deleted?: boolean; author: { kind: string; handle: string; display?: string }; text: string; attachments: { name: string; mime: string; bytes: number }[]; untrusted: true; truncated?: boolean; attachmentsTruncated?: boolean };
 type Page = { rows: Row[]; nextCursor: string | null; anchor?: string; exhausted: boolean; retryAfterS?: number; schema: string; untrusted: boolean };
@@ -36,6 +42,8 @@ function fakeProvider(service: ChannelService, sinks: Map<string, InboundSink>, 
     service,
     credentialFields: ["bot_token"],
     maxTextLength: 4096,
+    // like the real providers: Telegram reports no deletions
+    reports: { edits: true, deletions: service !== "telegram" },
     verify: async (creds) => ({ botId: `BOT-${String(creds.bot_token)}`, botName: "Test bot" }),
     conversations: async () => [],
     send: async () => ({ messageId: "sent-1" }),
@@ -56,7 +64,7 @@ function fakeProvider(service: ChannelService, sinks: Map<string, InboundSink>, 
 
 const net: ChannelNet = { fetch: (() => Promise.reject(new Error("no network"))) as typeof fetch, webSocket: () => { throw new Error("no ws"); }, now: () => Date.now(), sleep: async () => undefined };
 
-async function setup(options: { history?: ChannelService[]; services?: ChannelService[] } = {}) {
+async function setup(options: { history?: ChannelService[]; services?: ChannelService[]; noSeam?: boolean } = {}) {
   const sinks = new Map<string, InboundSink>();
   const services = options.services ?? ["telegram", "slack", "discord", "teams"];
   const providers = new Map<ChannelService, ChannelProvider>(services.map((s) => [s, fakeProvider(s, sinks, options.history?.includes(s) ? { readsHistory: true } : {})]));
@@ -68,7 +76,7 @@ async function setup(options: { history?: ChannelService[]; services?: ChannelSe
     warn: (msg, fields) => void logs.push({ level: "warn", msg, ...(fields ? { fields } : {}) }),
     error: (msg, fields) => void logs.push({ level: "error", msg, ...(fields ? { fields } : {}) }),
   };
-  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), channelProviders: providers, channelNet: net });
+  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), channelProviders: providers, channelNet: net, ...(options.noSeam ? {} : { verifiedAppProduct: (ctx) => VERIFIED[ctx.caller.id] ?? null }) });
   await app.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "Agent", mode: "free", status: "active" }, eventCtx(db));
   const accounts = new AccountStore(db);
   const hub = new ChannelHub({ db, accounts, secrets: memorySecrets(), providers, net });
@@ -76,14 +84,15 @@ async function setup(options: { history?: ChannelService[]; services?: ChannelSe
   const knowledge = testCtx({ db, app: KNOWLEDGE, appName: "Knowledge", log });
   const observer = testCtx({ db, app: OBSERVER, appName: "Observer", log });
   const agent = testCtx({ db, agent: AGENT, access: {}, log });
-  const rogue = testCtx({ db, app: "ins_01ROGUE00000000000000000000", appName: "Knowledge Pro", log });
+  // an instance that carries the exact manifest name "Knowledge" but is not the verified Knowledge
+  const rogue = testCtx({ db, app: ROGUE, appName: "Knowledge", log });
   const op = (name: string, input: Record<string, unknown>, ctx = person) => handlerOf(app, name)(input as Json, ctx);
   const connect = async (service: ChannelService, token: string, label = `${service} ${token}`): Promise<string> => {
     const out = (await op("channel_account_connect", { service, label, agent: AGENT, credentials: { bot_token: token } })) as unknown as { account: { id: string } };
     await new Promise((r) => setTimeout(r, 5));
     return out.account.id;
   };
-  const share = (account: string, product: string, level: string) => op("account_app_share", { account, product, level });
+  const share = (account: string, product: string, level: string, includeHistory = true) => op("account_app_share", { account, product, level, includeHistory });
   const msg = (n: number, extra: Partial<InboundMessage> = {}): InboundMessage => ({
     conversation: "chan-1",
     conversationName: "general",
@@ -109,6 +118,10 @@ async function setup(options: { history?: ChannelService[]; services?: ChannelSe
   return { db, app, hub, accounts, op, connect, share, ingest, msg, pull, logs, ctx: { person, knowledge, observer, agent, rogue } };
 }
 
+const tick = () => new Promise((r) => setTimeout(r, 3));
+const shareSetAt = (db: ReturnType<typeof testDb>, account: string, product: string): number =>
+  Number(db.prepare("SELECT set_at FROM connect_account_shares WHERE account_id = ? AND product = ?").get(account, product)?.set_at);
+
 /** The whole refusal: code, status and message. */
 async function refusal(p: Promise<unknown>): Promise<{ code: string; httpStatus: number; message: string }> {
   try {
@@ -130,7 +143,7 @@ test("manifest: the three data ops are agent-audience, crud read, effect read, i
     assert.deepEqual([op?.audience, op?.crud, op?.effect, op?.idempotency, op?.receipt, op?.scopeType, op?.holdFamily], ["agent", ["read"], "read", "none", false, undefined, undefined], id);
   }
   const share = manifest.operations.find((o) => o.id === "account_app_share");
-  assert.deepEqual([share?.audience, share?.crud, share?.effect, share?.receipt], ["person", ["update"], "write", false]);
+  assert.deepEqual([share?.audience, share?.crud, share?.effect, share?.receipt], ["person", ["update"], "write", true]);
   assert.equal(inputProps("data_pull").limit?.maximum, 200);
 });
 
@@ -178,7 +191,7 @@ test("account_app_share: an agent or an app cannot share (no_access 403); a pers
   }
   assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM connect_account_shares").get()?.n, 0);
   const out = (await s.share(acct, "knowledge", "shared")) as unknown as { level: string; shares: { product: string; level: string }[] };
-  assert.deepEqual([out.level, out.shares], ["shared", [{ product: "knowledge", level: "shared" }]]);
+  assert.deepEqual([out.level, out.shares.map((x) => [x.product, x.level])], ["shared", [["knowledge", "shared"]]]);
 });
 
 // ── sharing levels ──
@@ -295,7 +308,8 @@ test("accounts_overview lists the shares of a chat account and the apps one can 
   s.accounts.create({ service: "gmail", source: "composio", kind: "as_me", label: "Mail", status: "connected" });
   await s.share(acct, "observer", "available");
   const out = (await s.op("accounts_overview", {})) as unknown as { accounts: { id: string; source: string; shares?: unknown[] }[]; dataApps: { product: string; name: string }[] };
-  assert.deepEqual(out.accounts.find((a) => a.id === acct)?.shares, [{ product: "observer", level: "available" }]);
+  assert.deepEqual(out.accounts.find((a) => a.id === acct)?.shares, [{ product: "observer", level: "available", includeHistory: true, setAt: new Date(shareSetAt(s.db, acct, "observer")).toISOString() }]);
+  assert.equal((out as unknown as { dataOpsAvailable: boolean }).dataOpsAvailable, true);
   assert.equal(out.accounts.find((a) => a.source === "composio")?.shares, undefined);
   assert.deepEqual(out.dataApps, [{ product: "knowledge", name: "Knowledge" }, { product: "observer", name: "Observer" }]);
 });
@@ -544,35 +558,42 @@ test("an id over 200 characters becomes a stable hash (the contract allows 200);
 
 // ── fail loudly ──
 
-test("a producer bug fails loudly: a row that breaks messages/1 answers data_contract_violation 500, is logged, and no page leaves", async () => {
+test("a stored row that breaks messages/1 is quarantined: skipped, counted, logged with its rev, the page stays valid and the account is not blocked", async () => {
   const s = await setup();
   const acct = await s.connect("telegram", "t1");
   await s.share(acct, "knowledge", "shared");
-  s.ingest(acct, s.msg(1, { conversation: "" })); // conversation minLength 1 in the contract
-  const r = await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.knowledge));
-  assert.deepEqual([r.code, r.httpStatus], ["data_contract_violation", 500]);
-  const logged = s.logs.find((l) => l.level === "error" && l.msg.includes("messages/1"));
-  assert.ok(logged);
-  assert.ok(!JSON.stringify(logged).includes("message 1"), "message text stays out of the log");
-  // quiet on good: the same account with a good row pulls
-  s.db.prepare("DELETE FROM connect_channel_inbox").run();
-  s.ingest(acct, s.msg(2));
-  assert.equal((await s.pull(acct)).rows.length, 1);
+  s.ingest(acct, s.msg(1), s.msg(2, { messageId: "" }), s.msg(3));
+  const page = await s.pull(acct);
+  assert.deepEqual(page.rows.map((r) => r.id), ["m1", "m3"]);
+  assert.equal((page as unknown as { quarantined: number }).quarantined, 1);
+  assert.equal(page.exhausted, true);
+  const logged = s.logs.find((l) => l.level === "error" && l.msg.includes("does not conform"));
+  assert.deepEqual([logged?.fields?.rev, logged?.fields?.account], [2, acct]);
+  assert.ok(!JSON.stringify(logged).includes("message 2"), "message text stays out of the log");
+  // paging past the bad row does not stall: a page that holds only the bad row still moves the cursor
+  const first = await s.pull(acct, { limit: 1 });
+  const second = await s.pull(acct, { limit: 1, cursor: first.nextCursor as string });
+  assert.deepEqual([second.rows.length, second.exhausted], [0, false]);
+  assert.equal((second as unknown as { quarantined: number }).quarantined, 1);
+  assert.deepEqual((await s.pull(acct, { limit: 1, cursor: second.nextCursor as string })).rows.map((r) => r.id), ["m3"]);
+  // quiet on good: a page without a bad row has no quarantined member
+  s.db.prepare("DELETE FROM connect_channel_inbox WHERE message_id = ''").run();
+  assert.equal("quarantined" in (await s.pull(acct)), false);
 });
 
 test("a rate-limited source answers an empty, valid page with retryAfterS and the same cursor (clamped to 1..3600)", async () => {
   const s = await setup();
   const acct = s.accounts.create({ service: "telegram", source: "channel", kind: "as_itself", ownerAgent: AGENT, label: "x", status: "connected" });
-  const cursor = encodeCursor(5);
+  const cursor = encodeCursor(acct.id, 5);
   const limited = (seconds: number) =>
-    pullMessages({ db: s.db, botId: () => null, history: () => false, read: () => { throw new RetryLater(seconds); } }, acct, { direction: "forward", cursor, since: null, until: null, limit: 10 });
+    pullMessages({ db: s.db, botId: () => null, history: () => false, read: () => { throw new RetryLater(seconds); } }, acct, { direction: "forward", cursor, since: null, until: null, ingestedFrom: null, limit: 10 });
   const page = limited(30);
   assert.deepEqual(page, { rows: [], nextCursor: cursor, exhausted: false, retryAfterS: 30 });
   assert.deepEqual(validateAgainstSchema(schema, page as unknown as Json), { ok: true });
   assert.equal(limited(99_999).retryAfterS, 3600);
   assert.equal(limited(0.2).retryAfterS, 1);
   // any other source error is not swallowed
-  assert.throws(() => pullMessages({ db: s.db, botId: () => null, history: () => false, read: () => { throw new Error("boom"); } }, acct, { direction: "forward", cursor: null, since: null, until: null, limit: 10 }), { message: "boom" });
+  assert.throws(() => pullMessages({ db: s.db, botId: () => null, history: () => false, read: () => { throw new Error("boom"); } }, acct, { direction: "forward", cursor: null, since: null, until: null, ingestedFrom: null, limit: 10 }), { message: "boom" });
 });
 
 // ── retention and migration ──
@@ -581,7 +602,7 @@ test("retention: the inbound log is kept at least 7 days (30 now): a 8-day-old m
   const s = await setup();
   const acct = await s.connect("telegram", "t1");
   await s.share(acct, "knowledge", "shared");
-  assert.ok(INBOX_RETENTION_MS >= 7 * 24 * 3600 * 1000);
+  assert.equal(INBOX_RETENTION_MS, 30 * 24 * 3600 * 1000, "the constant is what the catalog reports");
   s.ingest(acct, s.msg(1), s.msg(2));
   const day = 24 * 3600 * 1000;
   s.db.prepare("UPDATE connect_channel_inbox SET received_at = ? WHERE message_id = 'm1'").run(Date.now() - 31 * day);
@@ -595,15 +616,248 @@ test("retention: the inbound log is kept at least 7 days (30 now): a 8-day-old m
   assert.equal(new Set(revs).size, revs.length);
 });
 
-test("migration 0010 gives rows logged before it a rev equal to their seq, and the counter continues above them", () => {
+test("migrations 0010 + 0011: old rows get a per-account rev (1, 2, 3 per account), the counters continue above them, the global counter is gone", () => {
   const db = new DatabaseSync(":memory:");
   const dir = join(root, "migrations");
   const files = readdirSync(dir).filter((n) => n.endsWith(".sql")).sort();
   for (const f of files.filter((n) => n < "0010")) db.exec(readFileSync(join(dir, f), "utf8"));
-  db.exec("INSERT INTO connect_accounts (id, service, source, kind, label, owner_agent, status, detail, created_at, updated_at) VALUES ('a1','telegram','channel','as_itself','x','agt_1','connected','',1,1)");
-  for (const n of [1, 2, 3]) db.exec(`INSERT INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, sender_id, sender_name, text, sent_at, received_at) VALUES ('a1','c','channel','m${n}','u','U','t',${n},${n})`);
+  for (const a of ["a1", "a2"]) db.exec(`INSERT INTO connect_accounts (id, service, source, kind, label, owner_agent, status, detail, created_at, updated_at) VALUES ('${a}','telegram','channel','as_itself','x','agt_1','connected','',1,1)`);
+  // interleaved traffic of two accounts
+  for (const [n, a] of [[1, "a1"], [2, "a2"], [3, "a2"], [4, "a1"], [5, "a1"]] as const) {
+    db.exec(`INSERT INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, sender_id, sender_name, text, sent_at, received_at) VALUES ('${a}','c','channel','m${n}','u','U','t',${n},${n})`);
+  }
   db.exec(readFileSync(join(dir, "0010_data_ops.sql"), "utf8"));
-  assert.deepEqual(db.prepare("SELECT seq, rev FROM connect_channel_inbox ORDER BY seq").all().map((r) => [r.seq, r.rev]), [[1, 1], [2, 2], [3, 3]]);
-  const id = Number(db.prepare("INSERT INTO connect_inbox_rev DEFAULT VALUES").run().lastInsertRowid);
-  assert.equal(id, 4);
+  assert.deepEqual(db.prepare("SELECT seq, rev FROM connect_channel_inbox ORDER BY seq").all().map((r) => [r.seq, r.rev]), [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]]);
+  db.exec(readFileSync(join(dir, "0011_data_ops_review.sql"), "utf8"));
+  assert.deepEqual(db.prepare("SELECT account_id, rev FROM connect_channel_inbox ORDER BY seq").all().map((r) => [r.account_id, r.rev]), [["a1", 1], ["a2", 1], ["a2", 2], ["a1", 2], ["a1", 3]]);
+  assert.deepEqual(db.prepare("SELECT account_id, last FROM connect_account_rev ORDER BY account_id").all().map((r) => [r.account_id, r.last]), [["a1", 3], ["a2", 2]]);
+  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'connect_inbox_rev'").get(), undefined);
+});
+
+// ── Coordinator ruling A: the app is identified by the verified caller product, never by name ──
+
+test("A: without a verified caller product (today) all three data ops refuse EVERY caller with data_ops_unavailable 503; the owner can still set shares", async () => {
+  const s = await setup({ noSeam: true });
+  const acct = await s.connect("telegram", "t1");
+  const out = (await s.share(acct, "knowledge", "shared")) as unknown as { dataOpsAvailable: boolean };
+  assert.equal(out.dataOpsAvailable, false);
+  const calls: [string, Record<string, unknown>][] = [["data_accounts_list", {}], ["data_catalog", { account: acct }], ["data_pull", { account: acct, dataset: "messages" }]];
+  for (const [op, input] of calls) {
+    for (const ctx of [s.ctx.agent, s.ctx.person, s.ctx.knowledge, s.ctx.observer, s.ctx.rogue]) {
+      assert.deepEqual(await refusal(s.op(op, input, ctx)), { code: "data_ops_unavailable", httpStatus: 503, message: "Connect data sharing needs a newer Tealbrick SDK" }, `${op} as ${ctx.caller.type} ${ctx.caller.name}`);
+    }
+  }
+  const overview = (await s.op("accounts_overview", {})) as unknown as { dataOpsAvailable: boolean };
+  assert.equal(overview.dataOpsAvailable, false);
+});
+
+test("A: an instance that carries the exact manifest name \"Knowledge\" but is not the verified Knowledge is refused (sees nothing, not_found)", async () => {
+  const s = await setup();
+  const acct = await s.connect("telegram", "t1");
+  await s.share(acct, "knowledge", "shared");
+  assert.equal(s.ctx.rogue.caller.name, "Knowledge");
+  assert.deepEqual(await s.op("data_accounts_list", {}, s.ctx.rogue), { accounts: [] });
+  assert.equal((await refusal(s.op("data_catalog", { account: acct }, s.ctx.rogue))).code, "not_found");
+  assert.equal((await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.rogue))).code, "not_found");
+  // and a verified instance is served whatever name it carries
+  const renamed = testCtx({ db: s.db, app: KNOWLEDGE, appName: "Something else entirely" });
+  assert.equal(((await s.op("data_accounts_list", {}, renamed)) as unknown as { accounts: unknown[] }).accounts.length, 1);
+});
+
+// ── B: edits and deletions through the real provider parsers ──
+
+test("B: Slack, Telegram and Discord events (real parsers) → the log → data_pull: an edit and a deletion reach a cursor that already passed the message", async () => {
+  const s = await setup();
+  const slack = await s.connect("slack", "sl");
+  const tg = await s.connect("telegram", "tg");
+  const dc = await s.connect("discord", "dc");
+  for (const a of [slack, tg, dc]) await s.share(a, "knowledge", "shared");
+  const feed = (acct: string, m: InboundMessage | null | undefined) => {
+    assert.ok(m);
+    s.hub.ingest(s.accounts.get(acct) as NonNullable<ReturnType<AccountStore["get"]>>, m);
+  };
+  const now = () => T0;
+
+  // Slack
+  const bot = { botId: "U0BOTUSER1", botName: "bot", workspace: "T0TESTTEAM" };
+  const sl = (event: Record<string, unknown>) => parseSlackEvent({ type: "event_callback", team_id: "T0TESTTEAM", event_id: "Ev0DATA0001", event: { type: "message", channel: "C0GENERAL1", channel_type: "channel", ...event } }, bot, now)?.message;
+  feed(slack, sl({ user: "U0HUMAN001", text: "one", ts: "1700000200.000100" }));
+  feed(slack, sl({ user: "U0HUMAN001", text: "two", ts: "1700000201.000100" }));
+  const slackCursor = (await s.pull(slack)).nextCursor as string;
+  feed(slack, sl({ subtype: "message_changed", message: { user: "U0HUMAN001", text: "one, edited", ts: "1700000200.000100", edited: { ts: "1700000260.000100" } } }));
+  feed(slack, sl({ subtype: "message_deleted", deleted_ts: "1700000201.000100" }));
+  const slackNext = await s.pull(slack, { cursor: slackCursor });
+  assert.deepEqual(slackNext.rows.map((r) => [r.id, r.text, r.editedAt, r.deleted]), [
+    ["1700000200.000100", "one, edited", "2023-11-14T22:17:40.000Z", undefined],
+    ["1700000201.000100", "", undefined, true],
+  ]);
+
+  // Telegram (edits only: Telegram never reports a deletion)
+  const tgBot = { botId: "999000111", botName: "tbot" };
+  const base = { message_id: 41, date: 1_760_000_000, chat: { id: 5550001, type: "private" }, from: { id: 5550001, first_name: "Ada" } };
+  feed(tg, parseTelegramUpdate({ update_id: 1, message: { ...base, text: "hello" } }, tgBot, 1));
+  const tgCursor = (await s.pull(tg)).nextCursor as string;
+  feed(tg, parseTelegramUpdate({ update_id: 2, edited_message: { ...base, text: "hello, edited", edit_date: 1_760_000_100 } }, tgBot, 1));
+  const tgNext = await s.pull(tg, { cursor: tgCursor });
+  assert.deepEqual(tgNext.rows.map((r) => [r.id, r.text, r.editedAt]), [["41", "hello, edited", "2025-10-09T08:55:00.000Z"]]);
+  assert.equal(((await s.op("data_catalog", { account: tg }, s.ctx.knowledge)) as unknown as { datasets: { edits: boolean; deletions: boolean }[] }).datasets[0]?.deletions, false);
+
+  // Discord
+  const ids = ["999"];
+  const gw = { id: "4400000000000000001", channel_id: "3300000000000000001", guild_id: "2200000000000000001", author: { id: "6600000000000000001", username: "ada" }, content: "build ok?", attachments: [], timestamp: "2026-10-12T09:01:02.345000+00:00", type: 0 };
+  feed(dc, parseDiscordMessage(gw, ids, 1));
+  const dcCursor = (await s.pull(dc)).nextCursor as string;
+  feed(dc, parseDiscordUpdate({ ...gw, content: "build ok? (edited)", edited_timestamp: "2026-10-12T09:05:00.000000+00:00" }, ids, 1));
+  for (const m of parseDiscordDeletes({ id: gw.id, channel_id: gw.channel_id, guild_id: gw.guild_id }, 1)) feed(dc, m);
+  const dcNext = await s.pull(dc, { cursor: dcCursor });
+  assert.deepEqual(dcNext.rows.map((r) => [r.id, r.deleted, r.text]), [[gw.id, true, ""]], "the deletion is the newest state of the row");
+  assert.equal(s.db.prepare("SELECT text FROM connect_channel_inbox WHERE account_id = ?").get(dc)?.text, "", "the stored text is erased");
+  assert.equal(((await s.op("data_catalog", { account: dc }, s.ctx.knowledge)) as unknown as { datasets: { deletions: boolean }[] }).datasets[0]?.deletions, true);
+});
+
+test("B: an edit of a message Connect never logged is stored as a new row; a deletion of one is dropped; a bot's edit does not reach agents", async () => {
+  const s = await setup();
+  const acct = await s.connect("telegram", "t1");
+  await s.share(acct, "knowledge", "shared");
+  s.ingest(acct, s.msg(1, { change: { kind: "edit", at: T0 + 5000 } }), s.msg(2, { change: { kind: "delete" } }));
+  const rows = (await s.pull(acct)).rows;
+  assert.deepEqual(rows.map((r) => [r.id, r.editedAt]), [["m1", new Date(T0 + 5000).toISOString()]]);
+});
+
+// ── C: a share starts when it is made ──
+
+test("C: a pull returns only messages Connect received at or after the share began, unless includeHistory; the catalog counts stay whole", async () => {
+  const s = await setup();
+  const acct = await s.connect("telegram", "t1");
+  s.ingest(acct, s.msg(1), s.msg(2));
+  s.db.prepare("UPDATE connect_channel_inbox SET received_at = ?").run(Date.now() - 5 * 24 * 3600 * 1000);
+  await s.share(acct, "knowledge", "shared", false);
+  await tick();
+  s.ingest(acct, s.msg(3));
+  assert.deepEqual((await s.pull(acct)).rows.map((r) => r.id), ["m3"], "only what arrived after the share");
+  // include the last 30 days: the whole log
+  await s.share(acct, "knowledge", "shared", true);
+  assert.deepEqual((await s.pull(acct)).rows.map((r) => r.id), ["m1", "m2", "m3"]);
+  // withdraw the history again: the share starts anew now
+  await tick();
+  await s.share(acct, "knowledge", "shared", false);
+  await tick();
+  assert.deepEqual((await s.pull(acct)).rows, []);
+  s.ingest(acct, s.msg(4));
+  const page = await s.pull(acct);
+  assert.deepEqual(page.rows.map((r) => r.id), ["m4"]);
+  assert.ok(page.anchor, "the anchor is within the shared part too");
+  // an old message that is edited later stays out (it was received before the share)
+  s.hub.markEdited(acct, "chan-1", "m1", "edited late", T0);
+  assert.deepEqual((await s.pull(acct)).rows.map((r) => r.id), ["m4"]);
+});
+
+test("C: set_at is kept by a call that changes nothing and moves when the level or the history choice changes", async () => {
+  const s = await setup();
+  const acct = await s.connect("telegram", "t1");
+  await s.share(acct, "knowledge", "shared", false);
+  s.db.prepare("UPDATE connect_account_shares SET set_at = 1000").run();
+  await s.share(acct, "knowledge", "shared", false);
+  assert.equal(shareSetAt(s.db, acct, "knowledge"), 1000);
+  await s.share(acct, "knowledge", "shared", true);
+  assert.ok(shareSetAt(s.db, acct, "knowledge") > 1000);
+});
+
+// ── E: receipts and audit ──
+
+test("E: account_app_share writes a receipt line; every data_pull writes one audit line (app, account, dataset, row count; no text)", async () => {
+  const s = await setup();
+  const acct = await s.connect("telegram", "t1", "Support bot");
+  const person = testCtx({ db: s.db, person: true });
+  await s.op("account_app_share", { account: acct, product: "knowledge", level: "shared", includeHistory: true }, person);
+  assert.deepEqual(person.receipts.summary, ["Sharing of “Support bot” with Knowledge: messages, read only"]);
+  assert.deepEqual(person.receipts.meta, [{ account: acct, product: "knowledge", level: "shared", includeHistory: true }]);
+  s.ingest(acct, s.msg(1, { text: "private words" }), s.msg(2));
+  await s.pull(acct, { limit: 1 });
+  await s.pull(acct);
+  const audit = s.db.prepare("SELECT product, account_id, dataset, row_count, quarantined FROM connect_data_audit ORDER BY id").all();
+  assert.deepEqual(audit.map((r) => ({ ...r })), [
+    { product: "knowledge", account_id: acct, dataset: "messages", row_count: 1, quarantined: 0 },
+    { product: "knowledge", account_id: acct, dataset: "messages", row_count: 2, quarantined: 0 },
+  ]);
+  assert.ok(!JSON.stringify(s.db.prepare("SELECT * FROM connect_data_audit").all()).includes("private words"));
+  assert.ok(s.logs.some((l) => l.msg === "data_pull" && l.fields?.rows === 1));
+  // a refused pull writes nothing
+  await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.observer));
+  assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM connect_data_audit").get()?.n, 2);
+});
+
+// ── F: cursors are per account ──
+
+test("F: another account's traffic does not move a cursor; a cursor of one account is refused on another", async () => {
+  const s = await setup();
+  const a = await s.connect("telegram", "ta");
+  const b = await s.connect("slack", "sb");
+  await s.share(a, "knowledge", "shared");
+  await s.share(b, "knowledge", "shared");
+  s.ingest(a, s.msg(1), s.msg(2));
+  const first = await s.pull(a);
+  assert.equal(first.nextCursor, encodeCursor(a, 2), "the cursor is the account's own sequence number");
+  s.ingest(b, ...Array.from({ length: 25 }, (_, i) => s.msg(i + 1)));
+  s.ingest(a, s.msg(3));
+  const next = await s.pull(a, { cursor: first.nextCursor as string });
+  assert.deepEqual(next.rows.map((r) => r.id), ["m3"]);
+  assert.equal(next.nextCursor, encodeCursor(a, 3), "25 messages of account B moved nothing");
+  assert.equal((await s.pull(b)).nextCursor, encodeCursor(b, 25));
+  const wrong = await refusal(s.op("data_pull", { account: b, dataset: "messages", cursor: first.nextCursor }, s.ctx.knowledge));
+  assert.deepEqual([wrong.code, wrong.httpStatus], ["cursor_invalid", 400]);
+});
+
+// ── H: author kind bot ──
+
+test("H: a sender the provider says is a bot reads as author kind bot; the bot's own id as self; agents never see bot messages", async () => {
+  const s = await setup();
+  const acct = await s.connect("slack", "sl");
+  await s.share(acct, "knowledge", "shared");
+  s.ingest(acct, s.msg(1, { senderId: "U0HUMAN001" }), s.msg(2, { senderId: "B0OTHERBOT", senderIsBot: true }), s.msg(3, { senderId: "U0APPUSER1", senderIsBot: true }), s.msg(4, { senderId: "BOT-sl" }));
+  const rows = (await s.pull(acct)).rows;
+  assert.deepEqual(rows.map((r) => [r.author.kind, r.author.handle]), [["person", "slack:U0HUMAN001"], ["bot", "slack:B0OTHERBOT"], ["bot", "slack:U0APPUSER1"], ["self", "slack:BOT-sl"]]);
+  // a bot id (B0OTHERBOT) that is not a user id is expected, not a warning; the only warning is the test bot's own invalid Slack id
+  assert.equal(s.logs.filter((l) => l.level === "warn" && l.msg.includes("not canonical")).length, 1);
+  const inbox = (await s.op("channel_inbox", {}, testCtx({ db: s.db, agent: AGENT, access: { [acct]: "read" } }))) as unknown as { messages: { messageId: string }[] };
+  assert.deepEqual(inbox.messages.map((m) => m.messageId), ["m1", "m4"], "bot rows never reach an agent");
+});
+
+// ── I/J: the exact catalog at the available level ──
+
+test("I: the catalog at the available level is exactly names, kinds, counts and flags: no value, no text, no sender", async () => {
+  const s = await setup();
+  const acct = await s.connect("telegram", "t1", "Support bot");
+  s.ingest(acct, s.msg(1, { text: "secret launch plan", senderName: "Anna" }), s.msg(2, { conversation: "chan-2", conversationName: "ops", senderId: "777" }));
+  await s.share(acct, "knowledge", "available");
+  const catalog = (await s.op("data_catalog", { account: acct }, s.ctx.knowledge)) as Record<string, unknown>;
+  const oldest = new Date(T0 + 1000).toISOString();
+  assert.deepEqual(catalog, {
+    account: acct,
+    service: "telegram",
+    label: "Support bot",
+    level: "available",
+    datasets: [
+      {
+        dataset: "messages",
+        title: "Messages",
+        kind: "messages",
+        delivery: "pull",
+        contract: "messages/1",
+        approxRows: 2,
+        history: false,
+        retentionDays: 30,
+        edits: true,
+        deletions: false,
+        oldestAt: oldest,
+        conversations: [
+          { id: "chan-1", name: "general", type: "channel", approxRows: 1 },
+          { id: "chan-2", name: "ops", type: "channel", approxRows: 1 },
+        ],
+      },
+    ],
+    untrusted: true,
+  });
+  const text = JSON.stringify(catalog);
+  for (const leak of ["secret launch plan", "Anna", "123456789", "777", "m1", "m2"]) assert.ok(!text.includes(leak), `catalog leaks ${leak}`);
 });
