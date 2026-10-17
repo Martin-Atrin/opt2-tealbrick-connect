@@ -2,9 +2,17 @@
 
 Versions follow `package.json` and `tealbrick.manifest.json` (product id `connect`). Proposed next version: 0.6.0 (new operations and a migration).
 
-## 0.6.0 - Unreleased
+## 0.6.0 - 2026-10-18 (prepared, not tagged)
 
-The shared data operation family and the dataset `messages` (request R3, knowledge S-9; decisions C230 and C169). Not tagged: Connect is under a stable soak and the lead decides the tag.
+The shared data operation family and the dataset `messages` (request R3, knowledge S-9; decisions C230 and C169). Not tagged: the lead decides the tag.
+
+### Data sharing works for apps the owner shares with (C230 R3, SDK-CALLER-PRODUCT)
+- The data operations `data_accounts_list`, `data_catalog` and `data_pull` now serve apps. The calling app is identified by the VERIFIED caller product (`ctx.caller.product`, miniapp-sdk 0.1.27), never by its name or instance id. The share check, the share record and the audit row all key on the product id.
+- An app caller without a verified product is refused `caller_unverified` (403); a person or an agent is refused `no_access` (403); an app the owner did not share the account with gets `not_found` (404), identical for every account it cannot see. There is no fallback to the app name.
+- The 503 `data_ops_unavailable` gate, the test-only `verifiedAppProduct` option of `createConnectApp` and the `dataOpsAvailable` flag are removed. Accounts no longer says "Sharing takes effect when Connect is updated".
+- Dependencies: miniapp-sdk 0.1.27 (was 0.1.25), spec 0.1.44 (was 0.1.39; the type of `OpContext.caller.product`), manifest 0.1.22 (was 0.1.19), conformance 0.1.19 (was 0.1.18; adds `A12.caller_product_verified`, which passes). Lockfile integrity re-pinned with `tb-ci pin-tarballs`.
+- Conformance waiver `A3.caps_count` renewed once, until conformance 0.1.21: the suite still cannot run a setup step as the caps agent, so the only capped receipt:false op (`buzz_schedule_cancel`) cannot run. Result: PASS (122 pass, 23 not_applicable, 1 waived).
+- New test `test/data-caller-e2e.test.ts` (real SDK, signed slice): an app named "Observer" whose verified product is Knowledge gets what is shared with Knowledge and nothing of what is shared with Observer.
 
 ### Added
 - Operations `data_accounts_list`, `data_catalog` and `data_pull` (agent audience until the app audience exists; effect read, crud read, idempotency none, no receipt). They serve apps only: an agent or a person gets `no_access` (403). One contract for Knowledge and Observer; a later dataset needs no new operation.
@@ -15,7 +23,7 @@ The shared data operation family and the dataset `messages` (request R3, knowled
 - Migration 0010: the inbound log gets `rev` (change counter), `edited_at`, `deleted` and `attachments`; tables `connect_inbox_rev` and `connect_account_shares`. Existing rows get `rev = seq`. There is no down migration; a failed update is rolled back by the SDK pre-update snapshot.
 
 ### Review changes (C230 review of PR #13)
-- Fail closed: the calling app is identified by the verified caller product, never by its manifest name. The SDK does not offer it yet (SDK-CALLER-PRODUCT, expected in miniapp-sdk 0.1.27), so every data operation answers every caller `data_ops_unavailable` (503) for now. The name table `src/data/apps.ts` is gone. The owner operation and the UI stay and say sharing takes effect when Connect is updated.
+- Fail closed: the calling app is identified by the verified caller product, never by its manifest name. The name table `src/data/apps.ts` is gone.
 - Edits and deletions come from the providers: Slack and Discord (both), Telegram (edits only; `deletions: false`). Teams is parsed but reports neither in `data_catalog` (`edits: false, deletions: false`: Teams sends the activities only in some installations). Where `deletions` is false a deleted message keeps its text for apps until the 30-day purge. An edit or deletion of a message that is not in the log is dropped and counted (`unmatchedChanges` in `channel_accounts`), never stored as a row. An edit is ordered and idempotent (a replay or an older edit takes no new rev).
 - A share starts when it is made: `data_pull` returns only messages received at or after it, unless `account_app_share` has `includeHistory` (UI: "Include the last 30 days").
 - A stored row that does not fit `messages/1` is quarantined (skipped, counted, logged with its rev) instead of blocking the account.

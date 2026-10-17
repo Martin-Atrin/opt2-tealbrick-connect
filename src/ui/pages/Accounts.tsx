@@ -105,7 +105,6 @@ export function Accounts() {
                   ownerName={agentName(account.ownerAgent)}
                   agents={agents.data ?? []}
                   dataApps={accounts.data?.dataApps ?? []}
-                  dataOpsAvailable={accounts.data?.dataOpsAvailable === true}
                   onShared={() => accounts.reload()}
                   onRenamed={() => {
                     setNotice(null);
@@ -211,7 +210,7 @@ function RefreshTools({ service }: { service: string }) {
   );
 }
 
-function AccountRow(props: { account: Account; ownerName: string; agents: AgentInfo[]; dataApps: DataApp[]; dataOpsAvailable: boolean; onShared(): Promise<void>; onRenamed(): void; onDisconnect(): void }) {
+function AccountRow(props: { account: Account; ownerName: string; agents: AgentInfo[]; dataApps: DataApp[]; onShared(): Promise<void>; onRenamed(): void; onDisconnect(): void }) {
   const { account } = props;
   const [editing, setEditing] = useState(false);
   const [label, setLabel] = useState(account.label);
@@ -266,7 +265,7 @@ function AccountRow(props: { account: Account; ownerName: string; agents: AgentI
       {error ? <Notice tone="error">{error}</Notice> : null}
       {account.status === "failed" && account.detail ? <p className="tb-soft">{account.detail}</p> : null}
       {account.status === "connected" ? <AgentAccess account={account} agents={props.agents} /> : null}
-      {account.status === "connected" && account.source === "channel" && props.dataApps.length > 0 ? <AppSharing account={account} apps={props.dataApps} available={props.dataOpsAvailable} onChanged={props.onShared} /> : null}
+      {account.status === "connected" && account.source === "channel" && props.dataApps.length > 0 ? <AppSharing account={account} apps={props.dataApps} onChanged={props.onShared} /> : null}
       {!editing ? (
         <div className="tb-ctas">
           <Button size="sm" onClick={() => setEditing(true)} aria-label={`Rename ${account.label}`}>
@@ -357,7 +356,7 @@ function AgentAccess({ account, agents }: { account: Account; agents: AgentInfo[
  * only" shows the app the conversation names and counts and no message. Agents never see this: the data operations
  * serve apps only. The control shows what the server holds: it re-reads the list after every save.
  */
-function AppSharing({ account, apps, available, onChanged }: { account: Account; apps: DataApp[]; available: boolean; onChanged(): Promise<void> }) {
+function AppSharing({ account, apps, onChanged }: { account: Account; apps: DataApp[]; onChanged(): Promise<void> }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const share = (app: DataApp) => account.shares?.find((x) => x.product === app.product);
@@ -378,7 +377,6 @@ function AppSharing({ account, apps, available, onChanged }: { account: Account;
   return (
     <fieldset className="tb-stack access">
       <legend className="tb-label access-legend">Apps (read only)</legend>
-      {available ? null : <p className="tb-soft">Sharing takes effect when Connect is updated. You can choose now.</p>}
       {error ? <Notice tone="error">{error}</Notice> : null}
       {apps.map((app) => {
         const current = share(app);

@@ -20,6 +20,7 @@ import { parseDiscordDeletes, parseDiscordMessage, parseDiscordUpdate } from "..
 import { parseSlackEvent } from "../src/channels/providers/slack.ts";
 import { parseTelegramUpdate } from "../src/channels/providers/telegram.ts";
 import { ChannelHub, INBOX_RETENTION_MS } from "../src/channels/service.ts";
+import { DATA_OPS_VERIFIED_PRODUCT_SUPPORTED, verifiedAppProduct } from "../src/data/caller.ts";
 import { encodeCursor, pullMessages, RetryLater } from "../src/data/messages.ts";
 import { DATA_APPS } from "../src/data/shares.ts";
 import { eventCtx, handlerOf, memorySecrets, root, testCtx, testDb } from "./helpers.ts";
@@ -30,9 +31,8 @@ const AGENT = "agt_01DATAAGENT000000000000000";
 const KNOWLEDGE = "ins_01KNOWLEDGE00000000000000";
 const OBSERVER = "ins_01OBSERVER0000000000000000";
 const ROGUE = "ins_01ROGUE00000000000000000000";
+const UNVERIFIED = "ins_01UNVERIFIED00000000000000";
 const T0 = 1_760_000_000_000;
-/** The test-only seam: instance id → the product the SDK would have verified (SDK-CALLER-PRODUCT, not yet in the SDK). */
-const VERIFIED: Record<string, string> = { [KNOWLEDGE]: "knowledge", [OBSERVER]: "observer" };
 
 type Row = { id: string; conversation: string; thread?: string; sentAt: string; editedAt?: string; deleted?: boolean; author: { kind: string; handle: string; display?: string }; text: string; attachments: { name: string; mime: string; bytes: number }[]; untrusted: true; truncated?: boolean; attachmentsTruncated?: boolean };
 type Page = { rows: Row[]; nextCursor: string | null; anchor?: string; exhausted: boolean; retryAfterS?: number; schema: string; untrusted: boolean };
@@ -64,7 +64,7 @@ function fakeProvider(service: ChannelService, sinks: Map<string, InboundSink>, 
 
 const net: ChannelNet = { fetch: (() => Promise.reject(new Error("no network"))) as typeof fetch, webSocket: () => { throw new Error("no ws"); }, now: () => Date.now(), sleep: async () => undefined };
 
-async function setup(options: { history?: ChannelService[]; services?: ChannelService[]; noSeam?: boolean } = {}) {
+async function setup(options: { history?: ChannelService[]; services?: ChannelService[] } = {}) {
   const sinks = new Map<string, InboundSink>();
   const services = options.services ?? ["telegram", "slack", "discord", "teams"];
   const providers = new Map<ChannelService, ChannelProvider>(services.map((s) => [s, fakeProvider(s, sinks, options.history?.includes(s) ? { readsHistory: true } : {})]));
@@ -76,16 +76,19 @@ async function setup(options: { history?: ChannelService[]; services?: ChannelSe
     warn: (msg, fields) => void logs.push({ level: "warn", msg, ...(fields ? { fields } : {}) }),
     error: (msg, fields) => void logs.push({ level: "error", msg, ...(fields ? { fields } : {}) }),
   };
-  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), channelProviders: providers, channelNet: net, ...(options.noSeam ? {} : { verifiedAppProduct: (ctx) => VERIFIED[ctx.caller.id] ?? null }) });
+  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations"), channelProviders: providers, channelNet: net });
   await app.events?.agentAdded?.({ id: AGENT as `agt_${string}`, name: "Agent", mode: "free", status: "active" }, eventCtx(db));
   const accounts = new AccountStore(db);
   const hub = new ChannelHub({ db, accounts, secrets: memorySecrets(), providers, net, log });
   const person = testCtx({ db, person: true, log });
-  const knowledge = testCtx({ db, app: KNOWLEDGE, appName: "Knowledge", log });
-  const observer = testCtx({ db, app: OBSERVER, appName: "Observer", log });
+  // app callers carry what the real SDK (>= 0.1.27) puts in ctx.caller.product: the product of the Portal-signed slice entry
+  const knowledge = testCtx({ db, app: KNOWLEDGE, appName: "Knowledge", appProduct: "knowledge", log });
+  const observer = testCtx({ db, app: OBSERVER, appName: "Observer", appProduct: "observer", log });
   const agent = testCtx({ db, agent: AGENT, access: {}, log });
-  // an instance that carries the exact manifest name "Knowledge" but is not the verified Knowledge
-  const rogue = testCtx({ db, app: ROGUE, appName: "Knowledge", log });
+  // an instance that carries the exact manifest name "Knowledge" but whose verified product is another one
+  const rogue = testCtx({ db, app: ROGUE, appName: "Knowledge", appProduct: "rogue-app", log });
+  // an app caller the slice does not list: no verified product at all (its name still says "Knowledge")
+  const unverified = testCtx({ db, app: UNVERIFIED, appName: "Knowledge", log });
   const op = (name: string, input: Record<string, unknown>, ctx = person) => handlerOf(app, name)(input as Json, ctx);
   const connect = async (service: ChannelService, token: string, label = `${service} ${token}`): Promise<string> => {
     const out = (await op("channel_account_connect", { service, label, agent: AGENT, credentials: { bot_token: token } })) as unknown as { account: { id: string } };
@@ -115,7 +118,7 @@ async function setup(options: { history?: ChannelService[]; services?: ChannelSe
     assert.ok(Buffer.byteLength(JSON.stringify(page)) <= 2 * 1024 * 1024);
     return page;
   };
-  return { db, app, hub, accounts, op, connect, share, ingest, msg, pull, logs, ctx: { person, knowledge, observer, agent, rogue } };
+  return { db, app, hub, accounts, op, connect, share, ingest, msg, pull, logs, ctx: { person, knowledge, observer, agent, rogue, unverified } };
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 3));
@@ -309,7 +312,7 @@ test("accounts_overview lists the shares of a chat account and the apps one can 
   await s.share(acct, "observer", "available");
   const out = (await s.op("accounts_overview", {})) as unknown as { accounts: { id: string; source: string; shares?: unknown[] }[]; dataApps: { product: string; name: string }[] };
   assert.deepEqual(out.accounts.find((a) => a.id === acct)?.shares, [{ product: "observer", level: "available", includeHistory: true, setAt: new Date(shareSetAt(s.db, acct, "observer")).toISOString() }]);
-  assert.equal((out as unknown as { dataOpsAvailable: boolean }).dataOpsAvailable, true);
+  assert.ok(!("dataOpsAvailable" in out), "the gate is gone: sharing works");
   assert.equal(out.accounts.find((a) => a.source === "composio")?.shares, undefined);
   assert.deepEqual(out.dataApps, [{ product: "knowledge", name: "Knowledge" }, { product: "observer", name: "Observer" }]);
 });
@@ -636,19 +639,36 @@ test("migrations 0010 + 0011: old rows get a per-account rev (1, 2, 3 per accoun
 
 // ── Coordinator ruling A: the app is identified by the verified caller product, never by name ──
 
-test("A: without a verified caller product (today) all three data ops refuse EVERY caller with data_ops_unavailable 503; the owner can still set shares", async () => {
-  const s = await setup({ noSeam: true });
+test("A: an app caller without a verified product is refused caller_unverified 403 by all three ops, whatever its name says; its share by name changes nothing", async () => {
+  const s = await setup();
   const acct = await s.connect("telegram", "t1");
-  const out = (await s.share(acct, "knowledge", "shared")) as unknown as { dataOpsAvailable: boolean };
-  assert.equal(out.dataOpsAvailable, false);
+  await s.share(acct, "knowledge", "shared");
+  await s.share(acct, "observer", "shared");
   const calls: [string, Record<string, unknown>][] = [["data_accounts_list", {}], ["data_catalog", { account: acct }], ["data_pull", { account: acct, dataset: "messages" }]];
+  const named = (name: string) => testCtx({ db: s.db, app: UNVERIFIED, appName: name });
   for (const [op, input] of calls) {
-    for (const ctx of [s.ctx.agent, s.ctx.person, s.ctx.knowledge, s.ctx.observer, s.ctx.rogue]) {
-      assert.deepEqual(await refusal(s.op(op, input, ctx)), { code: "data_ops_unavailable", httpStatus: 503, message: "Connect data sharing needs a newer Tealbrick SDK" }, `${op} as ${ctx.caller.type} ${ctx.caller.name}`);
+    for (const ctx of [s.ctx.unverified, named("Observer"), named("observer"), named("knowledge")]) {
+      const r = await refusal(s.op(op, input, ctx));
+      assert.deepEqual([r.code, r.httpStatus], ["caller_unverified", 403], `${op} as ${ctx.caller.name}`);
     }
+    // people and agents are still no_access; the verified apps are served
+    assert.equal((await refusal(s.op(op, input, s.ctx.person))).code, "no_access");
+    assert.equal((await refusal(s.op(op, input, s.ctx.agent))).code, "no_access");
+    await s.op(op, input, s.ctx.knowledge);
   }
-  const overview = (await s.op("accounts_overview", {})) as unknown as { dataOpsAvailable: boolean };
-  assert.equal(overview.dataOpsAvailable, false);
+});
+
+test("A: verifiedAppProduct answers the verified product of an app caller and null otherwise (no name, no id, no input)", () => {
+  const db = testDb();
+  assert.equal(DATA_OPS_VERIFIED_PRODUCT_SUPPORTED, true);
+  assert.equal(verifiedAppProduct(testCtx({ db, app: KNOWLEDGE, appName: "Observer", appProduct: "knowledge" })), "knowledge");
+  assert.equal(verifiedAppProduct(testCtx({ db, app: KNOWLEDGE, appName: "Observer" })), null, "an app without a product: null, whatever the name");
+  assert.equal(verifiedAppProduct(testCtx({ db, app: KNOWLEDGE, appName: "Observer", appProduct: "" })), null, "an empty product is no product");
+  assert.equal(verifiedAppProduct(testCtx({ db, person: true })), null);
+  assert.equal(verifiedAppProduct(testCtx({ db, agent: AGENT })), null);
+  const agentWithProduct = testCtx({ db, agent: AGENT });
+  (agentWithProduct.caller as { product?: string }).product = "observer";
+  assert.equal(verifiedAppProduct(agentWithProduct), null, "only an app caller has a verified product");
 });
 
 test("A: an instance that carries the exact manifest name \"Knowledge\" but is not the verified Knowledge is refused (sees nothing, not_found)", async () => {
@@ -659,8 +679,12 @@ test("A: an instance that carries the exact manifest name \"Knowledge\" but is n
   assert.deepEqual(await s.op("data_accounts_list", {}, s.ctx.rogue), { accounts: [] });
   assert.equal((await refusal(s.op("data_catalog", { account: acct }, s.ctx.rogue))).code, "not_found");
   assert.equal((await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.rogue))).code, "not_found");
+  // the share the owner gave Observer is not reachable by a name that says Observer
+  const nameOnly = testCtx({ db: s.db, app: ROGUE, appName: "Observer", appProduct: "rogue-app" });
+  await s.share(acct, "observer", "shared");
+  assert.deepEqual(await s.op("data_accounts_list", {}, nameOnly), { accounts: [] });
   // and a verified instance is served whatever name it carries
-  const renamed = testCtx({ db: s.db, app: KNOWLEDGE, appName: "Something else entirely" });
+  const renamed = testCtx({ db: s.db, app: KNOWLEDGE, appName: "Something else entirely", appProduct: "knowledge" });
   assert.equal(((await s.op("data_accounts_list", {}, renamed)) as unknown as { accounts: unknown[] }).accounts.length, 1);
 });
 
@@ -898,16 +922,16 @@ test("E: account_app_share writes a receipt line; every data_* call writes one a
   assert.ok(s.logs.some((l) => l.msg === "data_pull" && l.fields?.rows === 1));
 });
 
-test("E: while the gate is closed (no verified product) the refused calls are audited too, with the caller and no product", async () => {
-  const s = await setup({ noSeam: true });
+test("E: a refused unverified app caller is audited too, with the caller and no product", async () => {
+  const s = await setup();
   const acct = await s.connect("telegram", "t1");
   await s.share(acct, "knowledge", "shared");
-  await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.knowledge));
+  await refusal(s.op("data_pull", { account: acct, dataset: "messages" }, s.ctx.unverified));
   await refusal(s.op("data_catalog", { account: acct }, s.ctx.person));
   const audit = s.db.prepare("SELECT op, outcome, caller_type, caller_id, product FROM connect_data_audit ORDER BY id").all().map((r) => ({ ...r }));
   assert.deepEqual(audit, [
-    { op: "data_pull", outcome: "data_ops_unavailable", caller_type: "app", caller_id: KNOWLEDGE, product: null },
-    { op: "data_catalog", outcome: "data_ops_unavailable", caller_type: "person", caller_id: "per_01TESTOWNER00000000000000", product: null },
+    { op: "data_pull", outcome: "caller_unverified", caller_type: "app", caller_id: UNVERIFIED, product: null },
+    { op: "data_catalog", outcome: "no_access", caller_type: "person", caller_id: "per_01TESTOWNER00000000000000", product: null },
   ]);
 });
 

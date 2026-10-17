@@ -16,7 +16,7 @@ import { BuzzRefusal, BuzzRelay } from "./channels/buzz/relay.ts";
 import { ChannelError, type ChannelNet, type ChannelProvider, type ChannelService as ChannelServiceId } from "./channels/provider.ts";
 import { channelProviders } from "./channels/registry.ts";
 import { ChannelHub, INBOX_RETENTION_MS, isChannelService } from "./channels/service.ts";
-import { DATA_OPS_UNAVAILABLE_CODE, DATA_OPS_UNAVAILABLE_MESSAGE, DATA_OPS_VERIFIED_PRODUCT_SUPPORTED, verifiedAppProduct } from "./data/caller.ts";
+import { verifiedAppProduct } from "./data/caller.ts";
 import { DataError, MESSAGES_DATASET, messagesCatalog, type PullInput, pullMessages } from "./data/messages.ts";
 import { DATA_APPS, isDataApp, SHARE_LEVELS, type ShareLevel, ShareStore } from "./data/shares.ts";
 import { classifyMcpTool, isSendTool, recipientsOf } from "./effect.ts";
@@ -78,12 +78,6 @@ export interface ConnectEnv {
   channelNet?: ChannelNet;
   /** Manifest setting `buzz_relays` (env CONNECT_BUZZ_RELAYS): ordered relay list (C73; settings reach apps only as env, S6). */
   buzzRelays?: string | null;
-  /**
-   * TEST-ONLY seam for the data_* ops (C230 R3, Coordinator ruling): the verified product of an app caller. Production never
-   * sets it: `verifiedAppProduct` (src/data/caller.ts) answers null until the SDK offers the verified caller product, and
-   * then every data op answers `data_ops_unavailable` (503).
-   */
-  verifiedAppProduct?: (ctx: OpContext) => string | null;
   /** C133: the removed setting `buzz_relay_url` is still in the env (value never read); Buzz reports it clearly. */
   oldBuzzRelaySettingPresent?: boolean;
 }
@@ -485,13 +479,13 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
 
   // ── data_* op family (C230 R3): apps only, one confused-deputy rule for all three ops ──
 
-  /** Data ops need the verified caller product. Without it (today, SDK < 0.1.27) every data op refuses every caller. */
-  const dataOpsAvailable = DATA_OPS_VERIFIED_PRODUCT_SUPPORTED || env.verifiedAppProduct !== undefined;
-  /** The calling app's verified product id, or null for an app that is not verified. Persons and agents: no_access. */
-  const dataCaller = (ctx: OpContext): string | null => {
-    if (!dataOpsAvailable) return fail(DATA_OPS_UNAVAILABLE_CODE, DATA_OPS_UNAVAILABLE_MESSAGE, 503);
+  /**
+   * The calling app's VERIFIED product id (ctx.caller.product, miniapp-sdk >= 0.1.27). Persons and agents: no_access. An app
+   * caller without a verified product is refused (fail closed): never its name, its instance id or an input field.
+   */
+  const dataCaller = (ctx: OpContext): string => {
     if (ctx.caller.type !== "app") return fail("no_access", "The data operations serve apps only. Agents and people cannot use them.", 403);
-    return (env.verifiedAppProduct ?? verifiedAppProduct)(ctx);
+    return verifiedAppProduct(ctx) ?? fail("caller_unverified", "The calling app has no verified product, so it cannot use the data operations.", 403);
   };
   /** The ONE refusal for every account the calling app cannot see (unknown, not a chat account, not connected, not shared with it). */
   const noSuchAccount = (): never => fail("not_found", "No such account.", 404);
@@ -500,7 +494,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     if (note) note.product = product;
     const id = str(raw);
     const account = id ? s.accounts.get(id) : null;
-    if (!product || !account || account.source !== "channel" || account.status !== "connected") return noSuchAccount();
+    if (account?.source !== "channel" || account.status !== "connected") return noSuchAccount();
     const share = s.shares.get(account.id, product);
     if (!share) return noSuchAccount();
     if (need === "shared" && share.level !== "shared") fail("scope_denied", "This account is shared with you for its catalog only. Ask the owner to share it for reading.", 403);
@@ -578,7 +572,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
           const s = services(ctx);
           const product = dataCaller(ctx);
           note.product = product;
-          const accounts = (product ? s.shares.forProduct(product) : []).flatMap((share) => {
+          const accounts = s.shares.forProduct(product).flatMap((share) => {
             const a = s.accounts.get(share.account);
             return a?.source === "channel" && a.status === "connected"
               ? [{ account: a.id, service: a.service, label: a.label, kinds: ["messages"], level: share.level }]
@@ -1012,7 +1006,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       const s = services(ctx);
       // Chat accounts also list who the owner shared them with (C230 R3); `dataApps` are the apps one can share with.
       const accounts = s.accounts.list().map((a) => (a.source === "channel" ? { ...accountView(a), shares: s.shares.forAccount(a.id).map(shareView) } : accountView(a)));
-      return { accounts, dataApps: Object.entries(DATA_APPS).map(([product, name]) => ({ product, name })), dataOpsAvailable } as unknown as Json;
+      return { accounts, dataApps: Object.entries(DATA_APPS).map(([product, name]) => ({ product, name })) } as unknown as Json;
     },
     // The owner (a person) decides which app sees which chat account. Agents cannot reach this op; an app cannot widen itself.
     async account_app_share(input, ctx) {
@@ -1032,7 +1026,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         ctx.log.info("account shared with an app", { account: id, product, level: level as string });
         ctx.receipt.summary(`Sharing of “${account?.label ?? id}” with ${DATA_APPS[product]}: ${level === "none" ? "not shared" : level === "available" ? "names and counts only" : "messages, read only"}`);
         ctx.receipt.meta({ account: id, product, level: level as string, includeHistory: i.includeHistory === true });
-        return { account: id, product, level, shares: s.shares.forAccount(id).map(shareView), dataOpsAvailable } as unknown as Json;
+        return { account: id, product, level, shares: s.shares.forAccount(id).map(shareView) } as unknown as Json;
       });
     },
     async account_connect(input, ctx) {
