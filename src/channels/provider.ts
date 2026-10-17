@@ -66,6 +66,8 @@ export interface InboundMessage {
    * Read as `<service>:<id>` handles (SDK-API §18) in channel_inbox.
    */
   mentions?: string[];
+  /** R3: attachment metadata only (name, mime type, size); no provider fills it yet. At most 32 are kept. */
+  attachments?: { name: string; mime: string; bytes: number }[];
 }
 
 /** De-duplicated, bounded mention id list (F15). */
@@ -89,6 +91,12 @@ export interface ChannelProvider {
   /** Optional non-secret settings per account (e.g. Discord `message_content` intent), with defaults. */
   settingFields?: readonly { key: string; label: string; type: "boolean" | "string"; default: boolean | string }[];
   maxTextLength: number;
+  /**
+   * R3: true when Connect can page this service's messages BACKWARD in time (data_pull direction backward; data_catalog
+   * history). Phase 1: no provider sets it. Connect has no provider history reader yet, so the inbound log (kept for
+   * INBOX_RETENTION_MS) is the only record and is read forward.
+   */
+  readsHistory?: boolean;
   /** Check the credentials and return the bot identity (Slack auth.test, Telegram getMe, Discord /users/@me, Teams token + app id). */
   verify(creds: ChannelCredentials, net: ChannelNet): Promise<BotIdentity>;
   /** Conversations the bot can post to (bounded list, ≤ 200). */

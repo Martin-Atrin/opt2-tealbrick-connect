@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AppSecrets, SdkEventContext, SdkOpContext, SdkPublicContext } from "@opt2-tealbrick/miniapp-sdk";
 import type { CrudAction } from "@opt2-tealbrick/spec/manifest";
-import type { Db, Json } from "@opt2-tealbrick/spec/sdk";
+import type { Db, Json, Logger } from "@opt2-tealbrick/spec/sdk";
 
 import { ACCESS_CRUD, type AccessLevel } from "../src/effect.ts";
 
@@ -107,9 +107,13 @@ export function testCtx(input: {
   person?: boolean;
   /** companion APP caller (C86): caller.type "app", id = this instance id */
   app?: string;
+  /** manifest name of the companion app caller (the SDK names an app caller by it; default "Test app") */
+  appName?: string;
   /** SDK workspace (slice / person principal); defaults to `ws` */
   workspace?: string | null;
   publicUrl?: string | null;
+  /** capture log lines (default: dropped) */
+  log?: Logger;
 }): SdkOpContext & { receipts: { summary: string[]; meta: Json[] } } {
   const access = input.access ?? {};
   const receipts = { summary: [] as string[], meta: [] as Json[] };
@@ -122,7 +126,7 @@ export function testCtx(input: {
     caller: input.person
       ? { type: "person", id: "per_01TESTOWNER00000000000000" as `per_${string}`, name: "Owner", mode: null }
       : input.app
-        ? { type: "app", id: input.app as `ins_${string}`, name: "Test app", mode: null }
+        ? { type: "app", id: input.app as `ins_${string}`, name: input.appName ?? "Test app", mode: null }
         : { type: "agent", id: agent as `agt_${string}`, name: "Test agent", mode: "free" },
     grant: input.person
       ? null
@@ -154,7 +158,7 @@ export function testCtx(input: {
     agentScopeRequest: () => null,
     ownerLinkFor: () => null,
     db: input.db,
-    log: { debug() {}, info() {}, warn() {}, error() {} },
+    log: input.log ?? { debug() {}, info() {}, warn() {}, error() {} },
     signal: new AbortController().signal,
     publicUrl: input.publicUrl === undefined ? "https://bridge.example.com" : input.publicUrl,
     workspace: (input.workspace === undefined ? (input.ws ?? "ws_TEST") : input.workspace) as never,

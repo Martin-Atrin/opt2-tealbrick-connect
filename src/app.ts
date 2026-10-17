@@ -15,7 +15,9 @@ import { parsePubkey } from "./channels/buzz/nostr.ts";
 import { BuzzRefusal, BuzzRelay } from "./channels/buzz/relay.ts";
 import { ChannelError, type ChannelNet, type ChannelProvider, type ChannelService as ChannelServiceId } from "./channels/provider.ts";
 import { channelProviders } from "./channels/registry.ts";
-import { ChannelHub, isChannelService } from "./channels/service.ts";
+import { ChannelHub, INBOX_RETENTION_MS, isChannelService } from "./channels/service.ts";
+import { DATA_APPS, isDataApp, productOfAppName, SHARE_LEVELS, type ShareLevel, ShareStore } from "./data/apps.ts";
+import { DataError, MESSAGES_DATASET, messagesCatalog, type PullInput, pullMessages } from "./data/messages.ts";
 import { classifyMcpTool, isSendTool, recipientsOf } from "./effect.ts";
 import { gmailContentRead, holdSummary, mailFromArgs, mailFromGmail, renderHoldView } from "./hold-view.ts";
 import { isSenderChannel, SENDER_CHANNELS, SENDERS_PAGE, type SenderChannel, SenderStore, senderScopeId } from "./senders.ts";
@@ -104,6 +106,7 @@ interface Services {
   mcp: McpSource;
   channels: ChannelHub;
   senders: SenderStore;
+  shares: ShareStore;
 }
 
 export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
@@ -183,7 +186,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       },
       ...(ctx.log ? { log: ctx.log } : {}),
     });
-    const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp, channels, senders: new SenderStore(db) };
+    const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp, channels, senders: new SenderStore(db), shares: new ShareStore(db) };
     cache = { db, services: built };
     return built;
   };
@@ -197,6 +200,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       if (error instanceof CatalogError) fail(error.code, error.message, error.code === "catalog_app_unknown" || error.code === "tool_unknown" ? 404 : 400);
       if (error instanceof BuzzRefusal) fail(error.code, error.message, error.httpStatus);
       if (error instanceof ChannelError) fail(error.code, error.message, error.httpStatus);
+      if (error instanceof DataError) fail(error.code, error.message, error.httpStatus);
       if (error instanceof UpstreamError) fail(error.code, error.message.slice(0, 300), error.status && error.status < 500 ? 409 : 502);
       if (error instanceof OAuthError) fail(error.code, error.message, 502);
       if (error instanceof McpError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
@@ -472,7 +476,86 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     },
   };
 
+  // ── data_* op family (C230 R3): apps only, one confused-deputy rule for all three ops ──
+
+  /** The calling app's product id, or null for an app Connect does not know. Persons and agents are refused: no_access. */
+  const dataCaller = (ctx: OpContext): string | null => {
+    if (ctx.caller.type !== "app") return fail("no_access", "The data operations serve apps only. Agents and people cannot use them.", 403);
+    return productOfAppName(ctx.caller.name);
+  };
+  /** The ONE refusal for every account the calling app cannot see (unknown, not a chat account, not connected, not shared with it). */
+  const noSuchAccount = (): never => fail("not_found", "No such account.", 404);
+  const dataAccount = (s: Services, ctx: OpContext, raw: unknown, need: "available" | "shared"): { account: Account; level: "available" | "shared" } => {
+    const product = dataCaller(ctx);
+    const id = str(raw);
+    const account = id ? s.accounts.get(id) : null;
+    if (!product || !account || account.source !== "channel" || account.status !== "connected") return noSuchAccount();
+    const level = s.shares.level(account.id, product);
+    if (level === "none") return noSuchAccount();
+    if (need === "shared" && level !== "shared") fail("scope_denied", "This account is shared with you for its catalog only. Ask the owner to share it for reading.", 403);
+    return { account, level };
+  };
+  const messagesDeps = (s: Services, ctx: OpContext) => ({
+    db: ctx.db,
+    log: ctx.log,
+    botId: (accountId: string) => s.channels.bot(accountId)?.botId ?? null,
+    history: (service: string) => {
+      try {
+        return s.channels.provider(service).readsHistory === true;
+      } catch {
+        return false;
+      }
+    },
+  });
+  const timeArg = (value: unknown, name: string): number | null => {
+    const v = str(value);
+    if (v === undefined) return null;
+    const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/u.test(v) ? Date.parse(v) : Number.NaN;
+    return Number.isNaN(ms) ? fail(`${name}_invalid`, `${name} must be an RFC 3339 time, for example 2026-10-17T10:00:00Z.`) : ms;
+  };
+
   const handlers: Record<string, Handler | HandlerSpec> = {
+    // ── agent-audience data ops (apps only; the handler refuses everyone else) ──
+    async data_accounts_list(_input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const product = dataCaller(ctx);
+        const accounts = (product ? s.shares.forProduct(product) : []).flatMap((share) => {
+          const a = s.accounts.get(share.account);
+          return a?.source === "channel" && a.status === "connected"
+            ? [{ account: a.id, service: a.service, label: a.label, kinds: ["messages"], level: share.level }]
+            : [];
+        });
+        return { accounts } as unknown as Json;
+      });
+    },
+    async data_catalog(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const { account, level } = dataAccount(s, ctx, asInput(input).account, "available");
+        const history = messagesDeps(s, ctx).history(account.service);
+        return { account: account.id, service: account.service, label: account.label, level, datasets: [messagesCatalog(ctx.db, account, history, INBOX_RETENTION_MS)], untrusted: true } as unknown as Json;
+      });
+    },
+    async data_pull(input, ctx) {
+      return guard(async () => {
+        const s = services(ctx);
+        const i = asInput(input);
+        const { account } = dataAccount(s, ctx, i.account, "shared");
+        if (str(i.dataset) !== MESSAGES_DATASET) fail("not_found", "No such dataset on this account.", 404);
+        const direction = i.direction === "backward" ? "backward" : "forward";
+        const pull: PullInput = {
+          direction,
+          cursor: str(i.cursor) ?? null,
+          since: timeArg(i.since, "since"),
+          until: timeArg(i.until, "until"),
+          limit: typeof i.limit === "number" ? i.limit : 100,
+        };
+        const page = pullMessages(messagesDeps(s, ctx), account, pull);
+        return { ...page, schema: "messages/1", untrusted: true } as unknown as Json;
+      });
+    },
+
     // ── agent ops ──
     accounts_list: {
       // No manifest scopeType: an agent with no account access yet gets an empty list, not a scope refusal.
@@ -858,7 +941,28 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     },
     async accounts_overview(_input, ctx) {
       const s = services(ctx);
-      return { accounts: s.accounts.list().map(accountView) };
+      // Chat accounts also list who the owner shared them with (C230 R3); `dataApps` are the apps one can share with.
+      const accounts = s.accounts.list().map((a) => (a.source === "channel" ? { ...accountView(a), shares: s.shares.forAccount(a.id) } : accountView(a)));
+      return { accounts, dataApps: Object.entries(DATA_APPS).map(([product, name]) => ({ product, name })) } as unknown as Json;
+    },
+    // The owner (a person) decides which app sees which chat account. Agents cannot reach this op; an app cannot widen itself.
+    async account_app_share(input, ctx) {
+      return guard(async () => {
+        if (ctx.caller.type !== "person") fail("no_access", "Only the owner shares accounts with apps.", 403);
+        const s = services(ctx);
+        const i = asInput(input);
+        const id = str(i.account) ?? fail("account_required", "Pick the chat connection to share.");
+        const product = str(i.product) ?? fail("product_required", "Pick the app to share with.");
+        if (!isDataApp(product)) fail("product_unknown", `Pick an app that reads data: ${Object.values(DATA_APPS).join(" or ")}.`);
+        const level = str(i.level) as ShareLevel | undefined;
+        if (!level || !SHARE_LEVELS.includes(level)) fail("level_invalid", "Pick none, available or shared.");
+        const account = s.accounts.get(id);
+        if (account?.source !== "channel") fail("account_not_found", "No such chat connection.", 404);
+        if (level !== "none" && account?.status !== "connected") fail("channel_account_not_connected", "This chat connection is not connected. Connect it again first.", 409);
+        s.shares.set(id, product, level as ShareLevel);
+        ctx.log.info("account shared with an app", { account: id, product, level: level as string });
+        return { account: id, product, level, shares: s.shares.forAccount(id) } as unknown as Json;
+      });
     },
     async account_connect(input, ctx) {
       return guard(async () => {
@@ -1006,6 +1110,8 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
                 : account.source === "channel"
                   ? await s.channels.disconnect(account)
                   : s.accounts.update(id, { status: "revoked" });
+        // C230 R3: a disconnected account is shared with no app any more (a new connection starts at none).
+        s.shares.clearAccount(id);
         return { account: accountView(revoked) };
       });
     },
