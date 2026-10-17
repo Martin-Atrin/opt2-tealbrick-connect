@@ -35,6 +35,8 @@ import { pinnedFetch } from "./util/pinned-fetch.ts";
 import { scrubSecrets } from "./util/redact.ts";
 
 export const PRODUCT_SCOPE = "account";
+/** Characters of a Buzz post a hold view shows (a hold view over 16 000 characters is refused by the SDK). */
+export const BUZZ_POST_VIEW_CHARS = 12_000;
 export const COMPOSIO_KEY = "COMPOSIO_API_KEY";
 export const COMPOSIO_CALLBACK_PATH = "/oauth/composio/callback";
 export const MCP_CALLBACK_PATH = "/oauth/mcp/callback";
@@ -526,25 +528,48 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         return { untrusted: true, messages, relays };
       });
     },
-    async buzz_post(input, ctx) {
-      return guard(async () => {
+    buzz_post: {
+      run: async (input, ctx) =>
+        guard(async () => {
+          const i = asInput(input);
+          const s = services(ctx);
+          const sender = await buzzSender(ctx, s);
+          const channel = String(i.channel ?? "");
+          const replyTo = str(i.replyTo);
+          const root = str(i.threadRoot);
+          ctx.receipt.summary(`Buzz post to channel ${channel.slice(0, 8)}…${sender.kind === "workspace" ? " as the workspace sender" : ""}`);
+          ctx.receipt.meta({ ...senderMeta(sender), channel });
+          const posted = await s.relay.post(sender.key, {
+            channel,
+            content: String(i.content ?? ""),
+            ...(replyTo ? { replyTo: { id: replyTo, ...(root ? { root } : {}) } } : {}),
+            ...relaysArg(i.relays),
+          });
+          rememberBuzzSent(ctx.db, sender.key, posted.id, channel);
+          return posted;
+        }),
+      /**
+       * R5-5 (RS-5 QA): the owner reads the post as plain text, not as raw arguments. The per-op holdView has no ctx, so the
+       * sender (the agent's own identity, or the workspace sender for an app) is not known here. A post can be 20 000 characters
+       * but a hold view over 16 000 is refused, so the text is cut at BUZZ_POST_VIEW_CHARS with a visible "more not shown" line.
+       */
+      holdView: (input) => {
         const i = asInput(input);
-        const s = services(ctx);
-        const sender = await buzzSender(ctx, s);
-        const channel = String(i.channel ?? "");
+        const relays = relaysArg(i.relays).relays;
         const replyTo = str(i.replyTo);
-        const root = str(i.threadRoot);
-        ctx.receipt.summary(`Buzz post to channel ${channel.slice(0, 8)}…${sender.kind === "workspace" ? " as the workspace sender" : ""}`);
-        ctx.receipt.meta({ ...senderMeta(sender), channel });
-        const posted = await s.relay.post(sender.key, {
-          channel,
-          content: String(i.content ?? ""),
-          ...(replyTo ? { replyTo: { id: replyTo, ...(root ? { root } : {}) } } : {}),
-          ...relaysArg(i.relays),
-        });
-        rememberBuzzSent(ctx.db, sender.key, posted.id, channel);
-        return posted;
-      });
+        const text = [...String(i.content ?? "")];
+        const more = text.length - BUZZ_POST_VIEW_CHARS;
+        return [
+          "Buzz post",
+          `Channel: ${String(i.channel ?? "")}`,
+          "As: the calling agent",
+          ...(replyTo ? [`Reply to: ${replyTo}`] : []),
+          ...(relays ? [`Relays: ${relays.join(", ")}`] : []),
+          "",
+          text.slice(0, BUZZ_POST_VIEW_CHARS).join(""),
+          ...(more > 0 ? ["", `(${more} more characters not shown)`] : []),
+        ].join("\n");
+      },
     },
     async buzz_react(input, ctx) {
       return guard(async () => {

@@ -67,3 +67,19 @@ test("first DM opens the conversation (kind 41010) and posts (kind 9); later DMs
   const spec = app.handlers.buzz_dm_first as { holdView: (i: unknown) => string };
   assert.match(spec.holdView({ to: npubEncode(person), content: "Hello" }), /First direct message in Buzz[\s\S]*Hello/u);
 });
+
+test("R5-5: a held Buzz post shows a readable plain-text view, not the raw arguments", () => {
+  const app = createConnectApp({ manifest, migrationsDir: join(root, "migrations") });
+  const spec = app.handlers.buzz_post as { run?: unknown; holdView?: (i: unknown) => string };
+  assert.equal(typeof spec.run, "function", "buzz_post keeps its run handler");
+  assert.ok(spec.holdView, "buzz_post has a holdView");
+  const channel = "5a7d6c2e-1f3a-4c5b-9d8e-7f6a5b4c3d2e";
+  assert.equal(spec.holdView({ channel, content: "Release is out.\nSee notes." }), `Buzz post\nChannel: ${channel}\nAs: the calling agent\n\nRelease is out.\nSee notes.`);
+  const full = spec.holdView({ channel, content: "Thanks!", replyTo: "ev123", threadRoot: "ev001", relays: ["wss://relay.test.example"] });
+  assert.equal(full, `Buzz post\nChannel: ${channel}\nAs: the calling agent\nReply to: ev123\nRelays: wss://relay.test.example\n\nThanks!`);
+  assert.doesNotMatch(full, /[{}"]/u, "no raw JSON");
+  // a 20 000-character post stays under the SDK limit of 16 000 and says that text is cut
+  const long = spec.holdView({ channel, content: "x".repeat(20_000) });
+  assert.ok(long.length < 16_000);
+  assert.match(long, /\(8000 more characters not shown\)$/u);
+});
