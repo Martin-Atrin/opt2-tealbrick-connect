@@ -93,6 +93,7 @@ export function publicCtx(db: Db, input: { workspace?: string | null; keys?: Rec
     workspace: (input.workspace === undefined ? "ws_TEST" : input.workspace) as never,
     scopes: scopesStub,
     secrets: secretsFor(db),
+    viewUrl: null,
   };
 }
 
@@ -109,6 +110,8 @@ export function testCtx(input: {
   app?: string;
   /** manifest name of the companion app caller (the SDK names an app caller by it; default "Test app") */
   appName?: string;
+  /** the VERIFIED product of the companion app caller (SDK >= 0.1.27 `ctx.caller.product`); absent = an app the slice does not list */
+  appProduct?: string;
   /** SDK workspace (slice / person principal); defaults to `ws` */
   workspace?: string | null;
   publicUrl?: string | null;
@@ -126,7 +129,7 @@ export function testCtx(input: {
     caller: input.person
       ? { type: "person", id: "per_01TESTOWNER00000000000000" as `per_${string}`, name: "Owner", mode: null }
       : input.app
-        ? { type: "app", id: input.app as `ins_${string}`, name: input.appName ?? "Test app", mode: null }
+        ? { type: "app", id: input.app as `ins_${string}`, name: input.appName ?? "Test app", mode: null, ...(input.appProduct === undefined ? {} : { product: input.appProduct as never }) }
         : { type: "agent", id: agent as `agt_${string}`, name: "Test agent", mode: "free" },
     grant: input.person
       ? null
@@ -164,6 +167,7 @@ export function testCtx(input: {
     workspace: (input.workspace === undefined ? (input.ws ?? "ws_TEST") : input.workspace) as never,
     scopes: scopesStub,
     secrets: secretsFor(input.db),
+    viewUrl: null,
     ...jobsStub,
     receipts,
   };
