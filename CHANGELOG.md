@@ -14,6 +14,17 @@ The shared data operation family and the dataset `messages` (request R3, knowled
 - Contract files `test/contracts/messages.1.schema.json` and `messages.1.json` (sha256 in `test/contracts/PROVENANCE.md`); the runtime schema `src/contracts/messages.1.schema.json` is a second byte copy (the image has no `test/`).
 - Migration 0010: the inbound log gets `rev` (change counter), `edited_at`, `deleted` and `attachments`; tables `connect_inbox_rev` and `connect_account_shares`. Existing rows get `rev = seq`. There is no down migration; a failed update is rolled back by the SDK pre-update snapshot.
 
+### Review changes (C230 review of PR #13)
+- Fail closed: the calling app is identified by the verified caller product, never by its manifest name. The SDK does not offer it yet (SDK-CALLER-PRODUCT, expected in miniapp-sdk 0.1.27), so every data operation answers every caller `data_ops_unavailable` (503) for now. The name table `src/data/apps.ts` is gone. The owner operation and the UI stay and say sharing takes effect when Connect is updated.
+- Edits and deletions come from the providers: Slack, Discord and Teams (both), Telegram (edits only; `deletions: false`, a deleted Telegram message keeps its text for apps until the 30-day purge). `data_catalog` shows `edits` and `deletions` per dataset.
+- A share starts when it is made: `data_pull` returns only messages received at or after it, unless `account_app_share` has `includeHistory` (UI: "Include the last 30 days").
+- A stored row that does not fit `messages/1` is quarantined (skipped, counted, logged with its rev) instead of blocking the account.
+- `account_app_share` has a receipt; each `data_pull` writes one audit line (app, account, dataset, row count; no text).
+- Cursors are per account (per-account sequence, cursor names its account).
+- Author kind `bot` where the provider says so. Rows of other bots are now stored (flagged) and never listed for agents.
+- UI: the share control re-reads the list after every save.
+- Migration 0011: per-account `rev`, `sender_is_bot`, `include_history`, `connect_account_rev`, `connect_data_audit`; the global counter table of 0010 is dropped.
+
 ### Changed
 - Disconnecting an account removes its app shares.
 - `channel_inbox` (agents) no longer lists a message that the provider deleted.
@@ -21,8 +32,8 @@ The shared data operation family and the dataset `messages` (request R3, knowled
 
 ### History in this phase
 - No provider has a history reader in Connect yet. The inbound log (kept 30 days; apps need at least 7) is the only record. `data_catalog` says `history: false` for Slack, Teams, Telegram and Discord, and a backward pull answers `exhausted: true` with no rows. A forward pull from the start returns everything the log holds. Telegram bots are live-only.
-- Edits, deletions and attachment metadata are supported by the log and the contract, but the four inbound parsers do not report them yet; messages arrive as new rows only.
+- Attachment metadata is supported by the log and the contract, but no inbound parser fills it yet.
 - Buzz is not a connected account and is not part of the dataset in this phase.
 
 ### Gaps
-- The SDK gives an app caller's manifest name, not its product id. A small table (`src/data/apps.ts`) maps the name to `knowledge` or `observer`; an unknown name sees nothing. A `caller.product` on the operation context would remove the table.
+- Needs a miniapp-sdk that names the verified caller product (SDK-CALLER-PRODUCT, expected 0.1.27). Then `verifiedAppProduct` in `src/data/caller.ts` reads it and `DATA_OPS_VERIFIED_PRODUCT_SUPPORTED` becomes true.
