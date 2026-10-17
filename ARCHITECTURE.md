@@ -22,13 +22,13 @@ Connect is the one place for outside connectivity (C16 and the PRD). Per connect
 
 ## Operations (from `tealbrick.manifest.json`)
 
-46 operations.
-- Read (agent): `tools` (dynamic, per account), `accounts_list`, `buzz_identity`, `buzz_channels`, `buzz_read`, `identities_list`, `buzz_scheduled`, `channel_inbox`, `channel_conversations`.
+50 operations.
+- Read (agent): `tools` (dynamic, per account), `accounts_list`, `buzz_identity`, `buzz_channels`, `buzz_read`, `identities_list`, `buzz_scheduled`, `channel_inbox`, `channel_conversations`, and the apps-only data family `data_accounts_list`, `data_catalog`, `data_pull` (listed with agent audience until the audience `app` exists, G-1; the handlers refuse every caller that is not an app).
 - Write (agent): `buzz_schedule_cancel`.
 - Outward, hold family `outward`: `buzz_post`, `buzz_dm`, `buzz_react`, `buzz_edit`, `buzz_schedule`, `channel_send`, `channel_reply`, `channel_dm`, `channel_edit`, `channel_react`.
 - Outward, hold family `first_contact`: `buzz_dm_first`, `channel_dm_first`.
 - Destructive, hold `destructive`: `buzz_delete`, `channel_delete`.
-- Person: 8 reads (`services_search`, `accounts_overview`, ...), 13 writes (`account_connect`, `catalog_account_connect`, `mcp_account_connect`, `buzz_identities_generate`, `channel_account_connect`, `sender_identity_set`, ...), and `buzz_profile_publish` (outward, hold family `identity`).
+- Person: 8 reads (`services_search`, `accounts_overview`, ...), 14 writes (`account_connect`, `account_app_share`, `catalog_account_connect`, `mcp_account_connect`, `buzz_identities_generate`, `channel_account_connect`, `sender_identity_set`, ...), and `buzz_profile_publish` (outward, hold family `identity`).
 - Dynamic tools resolve per tool to read, write, outward, destructive or money. Unknown verbs classify fail-CLOSED (write or outward; payment is money, always held) (SEC-02). Hold view binding for send tools: account, recipients or channel, subject, first 500 characters as plain text, attachment names and sizes (`src/hold-view.ts`, C201).
 
 ## Scopes, hooks and companions
@@ -37,13 +37,25 @@ Connect is the one place for outside connectivity (C16 and the PRD). Per connect
 - **Hooks:** None.
 - **Companion grants it asks for:** None asked. Other apps call Connect: Inbox calls `buzz_dm`, `buzz_dm_first`, `channel_dm`, `channel_dm_first`; Fleet calls `identities_list`.
 
+## Data operations for apps (R3, unreleased)
+
+One generic contract for Knowledge (foundry) and Observer (FOUNDRY-DESIGN v2 section 3.4, decisions C230 and C169). A new dataset is a new entry in `data_catalog`, not a new operation.
+
+- **Operations:** `data_accounts_list {}`, `data_catalog {account}`, `data_pull {account, dataset, direction?, cursor?, since?, until?, limit <= 200}`. Effect read, crud read, idempotency none, no receipt, no scope type: a companion grant needs `crud: ["read"]` only. Every caller that is not an app (an agent, a person) gets `no_access` (403).
+- **Sharing:** the owner (person operation `account_app_share {account, product, level}`) shares one connected chat account with one app: `none` (default), `available` (`data_catalog` only: dataset names, kinds, approximate counts, conversation names, history flag; no message) or `shared` (`data_pull` too). Apps: Knowledge and Observer (`src/data/apps.ts`). An app sees only accounts shared with its product. Every account the app cannot see (unknown id, not a chat account, not connected, shared with another app, unknown app) answers the identical `not_found`. `available` with `data_pull` answers `scope_denied`. Disconnecting an account removes its shares.
+- **Which product calls:** the SDK 0.1.25 gives a handler the app caller's instance id and manifest name (from the verified slice `companionCallers`), not its product id. `productOfAppName` maps the name; an unknown name is an unknown app. Gap: a `caller.product` on the operation context would remove the table (request to be filed).
+- **Dataset `messages`** (kind messages, delivery pull, contract `messages/1`): rows from `connect_channel_inbox`. The pull order is `rev` (a new message, an edit or a deletion takes the next number, so a forward cursor sees changes to rows it already passed). Cursors are opaque and stable. Forward gives newer rows, backward older rows (newest first). `exhausted` ends a pull; a forward cursor stays valid after `exhausted` for polling. `anchor` (first page only) is the cursor of the newest row. `retryAfterS` is the answer of a rate-limited source (none in phase 1). Page: at most 200 rows and 2 MiB. Text is cut at 65 536 characters (`truncated`), attachments are metadata only, at most 32 (`attachmentsTruncated`), a deleted message has empty text. `author.handle` is `<channel>:<value>`: canonical (`normalizeHandle`) for slack and telegram, raw for teams and discord. `untrusted` is always true.
+- **Validation:** every page is checked against the vendored schema (`validateAgainstSchema` of `@opt2-tealbrick/manifest` 0.1.19) before it leaves; a mismatch answers `data_contract_violation` (500) and a log line with paths only, never a page.
+- **History in phase 1:** none of the four providers has a history reader in Connect. The inbound log is the only record (30 days; apps need 7), so the catalog says `history: false` and a backward pull answers `exhausted: true` with no rows. A provider with `readsHistory: true` pages backward through the log. Telegram bots are live-only. Slack, Teams and Discord could add a reader later without a new operation. Buzz is not a connected account and is not in phase 1.
+- **Not delivered yet by the providers:** edits, deletions and attachment metadata. The log, the hub (`markEdited`, `markDeleted`) and the contract support them; the inbound parsers still ignore those events.
+
 ## Settings, keys and environment
 
 Setting `buzz_relays` (up to 8 `wss://` lines, optional) becomes `CONNECT_BUZZ_RELAYS`. Key `COMPOSIO_API_KEY` (account default, optional). `TB_DATA_DIR` (default `/data`) holds the catalog cache. `CONNECT_BUZZ_RELAY_URL` is a removed setting; its presence is reported as an owner error. `.env.example` lists `CONNECT_DATA_DIR` and `CONNECT_SECRET_ENCRYPTION_KEY`; no code reads them (stale). The Dockerfile does NOT set `TB_DATA_DIR` or `TB_BACKUP_DIR`; the deploy recipe sets them (SDK-API section 13; `tb-gen railway` sets both).
 
 ## Data
 
-- **Stored:** Migrations 0001 to 0009: `connect_accounts`, `connect_states`, `connect_tools`, `connect_buzz_identities`, `connect_agents`, `connect_buzz_contacts`, `connect_buzz_sent`, `connect_buzz_scheduled`, `connect_buzz_agent_relays`, `connect_channel_bots`, `connect_channel_conversations`, `connect_channel_inbox` (inbound chat text, 30 days), `connect_channel_sent`, `connect_channel_contacts`, `connect_senders`, `connect_tool_contacts`, `connect_tool_owner_reads`. SEALED in `ctx.secrets`: Buzz secret keys, channel credentials (Slack, Teams, Telegram, Discord), catalog API-key credentials, MCP server auth headers and OAuth tokens.
+- **Stored:** Migrations 0001 to 0010: `connect_accounts`, `connect_states`, `connect_tools`, `connect_buzz_identities`, `connect_agents`, `connect_buzz_contacts`, `connect_buzz_sent`, `connect_buzz_scheduled`, `connect_buzz_agent_relays`, `connect_channel_bots`, `connect_channel_conversations`, `connect_channel_inbox` (inbound chat text, 30 days; `rev`, edit, delete and attachment metadata columns since 0010), `connect_inbox_rev` (change counter), `connect_account_shares` (account x app x level), `connect_channel_sent`, `connect_channel_contacts`, `connect_senders`, `connect_tool_contacts`, `connect_tool_owner_reads`. SEALED in `ctx.secrets`: Buzz secret keys, channel credentials (Slack, Teams, Telegram, Discord), catalog API-key credentials, MCP server auth headers and OAuth tokens.
 - **Never stored:** Composio OAuth material (Composio holds it; Connect keeps only the connected account id and a Composio user id equal to the workspace id), tool-call inputs beyond receipt digests.
 
 ## External calls and background work
@@ -53,7 +65,7 @@ Setting `buzz_relays` (up to 8 `wss://` lines, optional) becomes `CONNECT_BUZZ_R
 
 ## Person UI
 
-Services, Accounts, Buzz, Chat bots, Senders, Holds, Receipts, Agents and scopes, Keys, Backups and export (`src/ui/main.tsx`).
+Services, Accounts (with "Share with <app> (read only)" per chat account), Buzz, Chat bots, Senders, Holds, Receipts, Agents and scopes, Keys, Backups and export (`src/ui/main.tsx`).
 
 ## Requirements and runtime hints
 

@@ -26,6 +26,7 @@ Connect is the one place for outside connectivity. Per connected account the own
 - Secrets are sealed in the SDK secret store: Buzz secret keys, channel credentials, catalog API keys, MCP auth headers and OAuth tokens. Composio OAuth material stays at Composio.
 - Outbound requests go through a pinned fetch with a public-address policy (https, public addresses only, no stdio MCP servers).
 - Other apps call Connect: Inbox sends owner alerts through the Buzz and channel DM operations; Fleet reads `identities_list`.
+- Data for apps (R3, unreleased): the owner shares a connected chat account with one app, read only (Accounts, "Share with <app> (read only)"; none by default). The shared operations `data_accounts_list`, `data_catalog` and `data_pull` serve apps only and answer the dataset `messages` (contract `messages/1`, frozen in spec-v0.1.42) from the inbound log of Slack, Teams, Telegram and Discord (kept 30 days). See ARCHITECTURE "Data operations for apps".
 
 ## Language
 
@@ -53,6 +54,7 @@ Run the person UI without a bridge: set `TB_STANDALONE=1` and `TB_DATA_DIR` to a
 | `src/tools.ts`, `src/effect.ts` | Tool registry behind `connect__tools_search` / `connect__tools_call`; effect and tier classification. |
 | `src/hold-view.ts` | What the owner sees when a send is held (account, recipients or channel, subject, first 500 characters as plain text, attachment names and sizes). |
 | `src/senders.ts` | Workspace sender identities used for outgoing messages. |
+| `src/data/` | The shared `data_*` operations (R3): `apps.ts` (which app is shared which account), `messages.ts` (dataset `messages`, cursors, page validation). `src/contracts/` holds the frozen `messages/1` schema (byte copy, see `test/contracts/PROVENANCE.md`). |
 | `src/sources/composio/` | Composio client (key sent only to `*.composio.dev`), verified connect flow, tool sync, policies (`policies/composio/`). |
 | `src/sources/catalog/` | Tealbrick catalog source (OpenAPI-based connectors; user-supplied base URLs). |
 | `src/sources/mcp/` | Custom remote MCP servers (https, DNS-pinned) and their OAuth flow. |
@@ -60,7 +62,7 @@ Run the person UI without a bridge: set `TB_STANDALONE=1` and `TB_DATA_DIR` to a
 | `src/channels/` | Chat channels: Slack, Teams, Telegram, Discord providers, registry and service. |
 | `src/util/` | Pinned fetch, network policy, redaction, ids. |
 | `src/ui/` | React person UI. |
-| `migrations/` | 9 forward-only migrations. Never edit a released file. |
+| `migrations/` | 10 forward-only migrations. Never edit a released file. |
 | `skills/connect-tools/SKILL.md` | The agent skill declared in the manifest. |
 | `scripts/catalog-build.ts` | Builds the Tealbrick catalog artifact (sha256-pinned, scrubbed) that is attached to a GitHub release. |
 | `scripts/conformance.ts` | Connect checks the real conformance suite does not cover (app files, Composio policies); `pnpm conformance` runs `tb-conformance app` first. |
