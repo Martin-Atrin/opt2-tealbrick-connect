@@ -189,15 +189,20 @@ function telegramMentions(message: Record<string, unknown>, body: string, bot: P
 export function parseTelegramUpdate(update: unknown, bot: Pick<BotIdentity, "botId"> & { botName?: string }, now: number): InboundMessage | null {
   const record = asRecord(update);
   if (!record) return null;
-  const message = asRecord(record.message) ?? asRecord(record.channel_post);
+  const edited = asRecord(record.edited_message) ?? asRecord(record.edited_channel_post);
+  const message = asRecord(record.message) ?? asRecord(record.channel_post) ?? edited;
   if (!message) return null;
+  // R3: an edit needs its edit time; Telegram sends no event when a bot-visible message is deleted.
+  const editDate = edited && message === edited && typeof edited.edit_date === "number" && Number.isFinite(edited.edit_date) ? edited.edit_date * 1000 : null;
+  if (edited && message === edited && editDate === null) return null;
   const chat = asRecord(message.chat);
   const messageId = message.message_id;
   if (!chat || typeof chat.id !== "number" || !Number.isSafeInteger(chat.id) || typeof messageId !== "number" || !Number.isSafeInteger(messageId)) {
     return null;
   }
   const from = asRecord(message.from);
-  if (from?.is_bot === true || (from && String(from.id) === bot.botId)) return null;
+  if (from && String(from.id) === bot.botId) return null;
+  const senderIsBot = from?.is_bot === true;
   const senderChat = asRecord(message.sender_chat);
   const sender = from && typeof from.id === "number" ? from : senderChat;
   if (!sender || typeof sender.id !== "number" || !Number.isSafeInteger(sender.id)) return null;
@@ -229,6 +234,8 @@ export function parseTelegramUpdate(update: unknown, bot: Pick<BotIdentity, "bot
     text,
     sentAt: typeof date === "number" && Number.isFinite(date) && date > 0 ? date * 1000 : now,
     mentions: telegramMentions(message, body, bot),
+    ...(editDate !== null ? { change: { kind: "edit" as const, at: editDate } } : {}),
+    ...(senderIsBot ? { senderIsBot: true as const } : {}),
   };
 }
 
@@ -341,7 +348,7 @@ async function run(creds: ChannelCredentials, net: ChannelNet, bot: BotIdentity,
         creds,
         net,
         "getUpdates",
-        { ...(offset !== undefined ? { offset } : {}), timeout: TELEGRAM_POLL_TIMEOUT_S, allowed_updates: ["message", "channel_post"] },
+        { ...(offset !== undefined ? { offset } : {}), timeout: TELEGRAM_POLL_TIMEOUT_S, allowed_updates: ["message", "channel_post", "edited_message", "edited_channel_post"] },
         { signal, timeoutMs: (TELEGRAM_POLL_TIMEOUT_S + 15) * 1000 },
       );
       if (!Array.isArray(result)) throw new ChannelError("channel_provider_bad_response", "Telegram answered getUpdates but the reply was not understood.", 502);
@@ -379,5 +386,7 @@ export const telegramProvider: ChannelProvider = {
   delete: remove,
   react,
   openDirect,
+  // R3: edits arrive as edited_message / edited_channel_post; Telegram never tells a bot that a message was deleted.
+  reports: { edits: true, deletions: false },
   inbound: { kind: "poll", run },
 };

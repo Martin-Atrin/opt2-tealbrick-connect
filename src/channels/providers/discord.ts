@@ -232,7 +232,8 @@ export function parseDiscordMessage(data: unknown, botUserIds: readonly string[]
   const { id, channel_id: channelId } = d;
   if (typeof id !== "string" || !SNOWFLAKE.test(id) || typeof channelId !== "string" || !SNOWFLAKE.test(channelId)) return null;
   if (!author || typeof author.id !== "string" || !SNOWFLAKE.test(author.id)) return null;
-  if (botUserIds.includes(author.id) || author.bot === true || (typeof d.webhook_id === "string" && d.webhook_id.length > 0)) return null;
+  if (botUserIds.includes(author.id)) return null;
+  const senderIsBot = author.bot === true || (typeof d.webhook_id === "string" && d.webhook_id.length > 0);
   if (d.type !== undefined && d.type !== 0 && d.type !== 19) return null;
   const files = (Array.isArray(d.attachments) ? d.attachments : [])
     .slice(0, 10)
@@ -263,7 +264,42 @@ export function parseDiscordMessage(data: unknown, botUserIds: readonly string[]
       ...(Array.isArray(d.mentions) ? d.mentions : []).map((m) => asRecord(m)?.id).filter((v): v is string => typeof v === "string" && SNOWFLAKE.test(v)),
       ...[...content.matchAll(/<@!?(\d{5,25})>/gu)].map((m) => m[1] as string),
     ]),
+    ...(senderIsBot ? { senderIsBot: true as const } : {}),
   };
+}
+
+/**
+ * R3: gateway MESSAGE_UPDATE data → an edit, only when Discord says the message was edited (`edited_timestamp`) and sent
+ * the author and text (a partial update, for example a link preview, is ignored).
+ */
+export function parseDiscordUpdate(data: unknown, botUserIds: readonly string[], now: number): InboundMessage | null {
+  const d = asRecord(data);
+  const edited = typeof d?.edited_timestamp === "string" ? Date.parse(d.edited_timestamp) : Number.NaN;
+  if (!Number.isFinite(edited)) return null;
+  const message = parseDiscordMessage(data, botUserIds, now);
+  return message ? { ...message, change: { kind: "edit", at: edited } } : null;
+}
+
+/** R3: gateway MESSAGE_DELETE / MESSAGE_DELETE_BULK data → one deletion per message id (conversation and id only). */
+export function parseDiscordDeletes(data: unknown, now: number): InboundMessage[] {
+  const d = asRecord(data);
+  const channelId = d?.channel_id;
+  if (!d || typeof channelId !== "string" || !SNOWFLAKE.test(channelId)) return [];
+  const ids = Array.isArray(d.ids) ? d.ids : [d.id];
+  return ids
+    .filter((id): id is string => typeof id === "string" && SNOWFLAKE.test(id))
+    .slice(0, 100)
+    .map((id) => ({
+      conversation: channelId,
+      conversationType: typeof d.guild_id === "string" ? ("channel" as const) : ("direct" as const),
+      messageId: id,
+      threadId: null,
+      senderId: "",
+      senderName: "",
+      text: "",
+      sentAt: now,
+      change: { kind: "delete" as const },
+    }));
 }
 
 type GatewayPayload = { op?: unknown; d?: unknown; s?: unknown; t?: unknown };
@@ -390,9 +426,16 @@ function gatewaySession(
         state.attempts = 0;
         return;
       }
-      if (payload.t === "MESSAGE_CREATE") {
-        const message = parseDiscordMessage(data, state.botUserIds, net.now());
-        if (!message) return;
+      const messages =
+        payload.t === "MESSAGE_CREATE"
+          ? [parseDiscordMessage(data, state.botUserIds, net.now())]
+          : payload.t === "MESSAGE_UPDATE"
+            ? [parseDiscordUpdate(data, state.botUserIds, net.now())]
+            : payload.t === "MESSAGE_DELETE" || payload.t === "MESSAGE_DELETE_BULK"
+              ? parseDiscordDeletes(data, net.now())
+              : [];
+      for (const message of messages) {
+        if (!message) continue;
         try {
           sink(message);
         } catch {
@@ -508,5 +551,7 @@ export const discordProvider: ChannelProvider = {
   delete: remove,
   react,
   openDirect,
+  // R3: MESSAGE_UPDATE / MESSAGE_DELETE (Discord) and message_changed / message_deleted (Slack) are read.
+  reports: { edits: true, deletions: true },
   inbound: { kind: "socket", run },
 };

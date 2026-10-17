@@ -49,7 +49,7 @@ export interface ChannelDeps {
   log?: Logger;
 }
 
-type BotRow = BotIdentity & { settings: Record<string, string>; inboundState: string; inboundDetail: string };
+type BotRow = BotIdentity & { settings: Record<string, string>; inboundState: string; inboundDetail: string; unmatchedChanges: number };
 
 function parseMentions(value: unknown): string[] {
   if (typeof value !== "string") return [];
@@ -89,6 +89,7 @@ export class ChannelHub {
       settings: JSON.parse(String(r.settings)) as Record<string, string>,
       inboundState: String(r.inbound_state),
       inboundDetail: String(r.inbound_detail),
+      unmatchedChanges: Number(r.unmatched_changes ?? 0),
     };
   }
 
@@ -179,13 +180,91 @@ export class ChannelHub {
   ingest(account: Account, m: InboundMessage): boolean {
     const own = this.#d.db.prepare("SELECT 1 FROM connect_channel_sent WHERE account_id = ? AND conversation = ? AND message_id = ?").get(account.id, m.conversation, m.messageId);
     if (own) return false;
+    // R3: a reported edit or deletion changes a message that is already logged (it takes a new `rev`). One that is not
+    // logged (older than the retention, from before the bot connected, or dropped) is an ORPHAN: it is counted and logged
+    // (metadata only) and never becomes a row, so an agent never sees an edit as a new message.
+    if (m.change) {
+      const state = this.#state(account.id, m.conversation, m.messageId);
+      if (state === "none") this.#orphan(account, m.change.kind);
+      else if (state === "live") {
+        if (m.change.kind === "delete") this.markDeleted(account.id, m.conversation, m.messageId);
+        else this.markEdited(account.id, m.conversation, m.messageId, m.text, m.change.at);
+      }
+      return false;
+    }
+    // Another bot's message is kept only for data apps: with no app share on the account it is dropped (as before R3).
+    if (m.senderIsBot && !this.#shared(account.id)) return false;
     this.#rememberConversation(account.id, m.conversation, m.conversationName ?? m.conversation, m.conversationType);
     const r = this.#d.db
       .prepare(
-        `INSERT OR IGNORE INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, thread_id, sender_id, sender_name, text, sent_at, received_at, mentions)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, thread_id, sender_id, sender_name, text, sent_at, received_at, mentions, rev, attachments, edited_at, sender_is_bot)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(account.id, m.conversation, m.conversationType, m.messageId, m.threadId, m.senderId, m.senderName.slice(0, 120), m.text, m.sentAt, Date.now(), JSON.stringify(m.mentions ?? []));
+      .run(
+        account.id,
+        m.conversation,
+        m.conversationType,
+        m.messageId,
+        m.threadId,
+        m.senderId,
+        m.senderName.slice(0, 120),
+        m.text,
+        m.sentAt,
+        Date.now(),
+        JSON.stringify(m.mentions ?? []),
+        this.#nextRev(account.id),
+        m.attachments && m.attachments.length > 0 ? JSON.stringify(m.attachments.slice(0, 32)) : null,
+        null,
+        m.senderIsBot ? 1 : 0,
+      );
+    return r.changes > 0;
+  }
+
+  /** R3: the next change number of this account's `messages` dataset (a per-account sequence; a duplicate message wastes one). */
+  #nextRev(accountId: string): number {
+    this.#d.db
+      .prepare("INSERT INTO connect_account_rev (account_id, last) VALUES (?, 1) ON CONFLICT (account_id) DO UPDATE SET last = last + 1")
+      .run(accountId);
+    return Number(this.#d.db.prepare("SELECT last FROM connect_account_rev WHERE account_id = ?").get(accountId)?.last);
+  }
+
+  #state(accountId: string, conversation: string, messageId: string): "none" | "live" | "deleted" {
+    const row = this.#d.db.prepare("SELECT deleted FROM connect_channel_inbox WHERE account_id = ? AND conversation = ? AND message_id = ?").get(accountId, conversation, messageId);
+    return row ? (Number(row.deleted) === 1 ? "deleted" : "live") : "none";
+  }
+
+  /** Any app share (available or shared) on this account. */
+  #shared(accountId: string): boolean {
+    return !!this.#d.db.prepare("SELECT 1 FROM connect_account_shares WHERE account_id = ? LIMIT 1").get(accountId);
+  }
+
+  #orphan(account: Account, kind: "edit" | "delete"): void {
+    this.#d.db.prepare("UPDATE connect_channel_bots SET unmatched_changes = unmatched_changes + 1 WHERE account_id = ?").run(account.id);
+    this.#d.log?.info("channel: an edit or deletion names a message that is not in the log; dropped", { service: account.service, account: account.id, kind });
+  }
+
+  /** R3: the provider deleted a logged message. Its text and attachments are erased; the row takes a new `rev` so pulls see it. */
+  markDeleted(accountId: string, conversation: string, messageId: string): boolean {
+    if (this.#state(accountId, conversation, messageId) !== "live") return false;
+    const r = this.#d.db
+      .prepare("UPDATE connect_channel_inbox SET text = '', attachments = NULL, deleted = 1, rev = ? WHERE account_id = ? AND conversation = ? AND message_id = ? AND deleted = 0")
+      .run(this.#nextRev(accountId), accountId, conversation, messageId);
+    return r.changes > 0;
+  }
+
+  /**
+   * R3: the provider edited a logged message. Ordered and idempotent: it applies only when `editedAt` is newer than the
+   * stored edit time, so a replay or a late older event takes no new `rev`.
+   */
+  markEdited(accountId: string, conversation: string, messageId: string, text: string, editedAt: number): boolean {
+    if (this.#state(accountId, conversation, messageId) !== "live") return false;
+    const newer = this.#d.db
+      .prepare("SELECT 1 FROM connect_channel_inbox WHERE account_id = ? AND conversation = ? AND message_id = ? AND (edited_at IS NULL OR edited_at < ?)")
+      .get(accountId, conversation, messageId, editedAt);
+    if (!newer) return false;
+    const r = this.#d.db
+      .prepare("UPDATE connect_channel_inbox SET text = ?, edited_at = ?, rev = ? WHERE account_id = ? AND conversation = ? AND message_id = ? AND deleted = 0")
+      .run(text, editedAt, this.#nextRev(accountId), accountId, conversation, messageId);
     return r.changes > 0;
   }
 
@@ -195,7 +274,7 @@ export class ChannelHub {
     const rows = this.#d.db
       .prepare(
         `SELECT i.*, a.service FROM connect_channel_inbox i JOIN connect_accounts a ON a.id = i.account_id
-         WHERE i.account_id IN (${placeholders}) AND i.seq > ? ORDER BY i.seq LIMIT ?`,
+         WHERE i.account_id IN (${placeholders}) AND i.seq > ? AND i.deleted = 0 AND i.sender_is_bot = 0 ORDER BY i.seq LIMIT ?`,
       )
       .all(...accountIds, sinceSeq, Math.max(1, Math.min(limit, 100)));
     const botIds = new Map(accountIds.map((id) => [id, this.bot(id)?.botId.toLowerCase() ?? null]));
@@ -217,7 +296,11 @@ export class ChannelHub {
       mentionsMe: bot !== null && ids.some((id) => id.toLowerCase() === bot),
       };
     });
-    return { messages, nextSeq: messages.at(-1)?.seq ?? sinceSeq };
+    // Fewer than `limit` visible rows means the window is exhausted: skip past hidden rows (deleted messages, other bots')
+    // too, so the next call does not scan them again. A full window ends at its last visible row.
+    if (messages.length >= Math.max(1, Math.min(limit, 100))) return { messages, nextSeq: messages.at(-1)?.seq ?? sinceSeq };
+    const head = this.#d.db.prepare(`SELECT MAX(seq) AS seq FROM connect_channel_inbox WHERE account_id IN (${placeholders})`).get(...accountIds)?.seq;
+    return { messages, nextSeq: Math.max(sinceSeq, messages.at(-1)?.seq ?? sinceSeq, head === null || head === undefined ? 0 : Number(head)) };
   }
 
   inboundRow(accountId: string, seq: number): InboxRow | null {
@@ -255,7 +338,7 @@ export class ChannelHub {
     if (contact) return String(contact.conversation);
     // A person who wrote to the bot in a direct conversation is not a first contact.
     const wrote = this.#d.db
-      .prepare("SELECT conversation FROM connect_channel_inbox WHERE account_id = ? AND sender_id = ? AND conversation_type = 'direct' ORDER BY seq DESC LIMIT 1")
+      .prepare("SELECT conversation FROM connect_channel_inbox WHERE account_id = ? AND sender_id = ? AND conversation_type = 'direct' AND sender_is_bot = 0 ORDER BY seq DESC LIMIT 1")
       .get(account.id, personId);
     return wrote ? String(wrote.conversation) : null;
   }
@@ -271,7 +354,7 @@ export class ChannelHub {
     const provider = this.provider(account.service);
     const known = this.#d.db.prepare("SELECT type FROM connect_channel_conversations WHERE account_id = ? AND conversation = ?").get(account.id, input.conversation);
     if (known?.type === "direct") {
-      const wrote = this.#d.db.prepare("SELECT 1 FROM connect_channel_inbox WHERE account_id = ? AND conversation = ? LIMIT 1").get(account.id, input.conversation);
+      const wrote = this.#d.db.prepare("SELECT 1 FROM connect_channel_inbox WHERE account_id = ? AND conversation = ? AND sender_is_bot = 0 LIMIT 1").get(account.id, input.conversation);
       const contact = this.#d.db.prepare("SELECT 1 FROM connect_channel_contacts WHERE account_id = ? AND conversation = ?").get(account.id, input.conversation);
       if (!wrote && !contact) throw new ChannelError("channel_first_contact_required", "This is a direct conversation with someone you have not written to. Use channel_dm_first.", 409);
     }

@@ -185,7 +185,11 @@ test("discord: parseDiscordMessage normalises MESSAGE_CREATE and ignores bots an
     sentAt: Date.parse("2026-10-12T09:01:02.345Z"),
     mentions: [],
   });
-  assert.equal(parseDiscordMessage(gw.messageOtherBot.d, ids, 1), null);
+  // R3: another bot is kept and flagged (data apps read it as author kind bot); the bot itself is still ignored.
+  assert.deepEqual(
+    [parseDiscordMessage(gw.messageOtherBot.d, ids, 1)?.senderIsBot, parseDiscordMessage(gw.messageOtherBot.d, ids, 1)?.senderId],
+    [true, "8800000000000000001"],
+  );
   assert.equal(parseDiscordMessage(gw.messageOwn.d, ids, 1), null);
   const dm = parseDiscordMessage(gw.messageDmReply.d, ids, 1);
   assert.equal(dm?.conversationType, "direct");
@@ -237,6 +241,7 @@ test("discord gateway: HELLO → IDENTIFY, heartbeat, MESSAGE_CREATE → sink, R
     got.map((m) => [m.conversation, m.messageId, m.conversationType]),
     [
       ["3300000000000000001", "4400000000000000001", "channel"],
+      ["3300000000000000001", "4400000000000000002", "channel"],
       ["5500000000000000001", "4400000000000000004", "direct"],
     ],
   );
@@ -367,4 +372,21 @@ test("discord gateway: 4014 throws channel_gateway_refused with a readable messa
     assert.match(error.message, /MESSAGE CONTENT/u);
     return true;
   });
+});
+
+test("R3 discord: MESSAGE_UPDATE with edited_timestamp is an edit; a partial update is ignored; MESSAGE_DELETE and MESSAGE_DELETE_BULK are deletions", async () => {
+  const { parseDiscordDeletes, parseDiscordUpdate, discordProvider } = await import("../src/channels/providers/discord.ts");
+  const ids = [bot.botId];
+  const update = parseDiscordUpdate({ ...gw.messageGuild.d, content: "edited text", edited_timestamp: "2026-10-12T09:05:00.000000+00:00" }, ids, 1);
+  assert.deepEqual(update?.change, { kind: "edit", at: Date.parse("2026-10-12T09:05:00.000Z") });
+  assert.equal(update?.text, "edited text\n[attachment: build.log]");
+  assert.equal(update?.messageId, "4400000000000000001");
+  assert.equal(parseDiscordUpdate({ ...gw.messageGuild.d, edited_timestamp: null }, ids, 1), null, "a link preview update is not an edit");
+  assert.equal(parseDiscordUpdate({ id: "4400000000000000001", channel_id: "3300000000000000001", edited_timestamp: "2026-10-12T09:05:00.000000+00:00" }, ids, 1), null, "no author, no text");
+  const one = parseDiscordDeletes({ id: "4400000000000000001", channel_id: "3300000000000000001", guild_id: "2200000000000000001" }, 7);
+  assert.deepEqual(one.map((m) => [m.conversation, m.messageId, m.change]), [["3300000000000000001", "4400000000000000001", { kind: "delete" }]]);
+  const bulk = parseDiscordDeletes({ ids: ["4400000000000000001", "4400000000000000002", "nope"], channel_id: "3300000000000000001" }, 7);
+  assert.deepEqual(bulk.map((m) => m.messageId), ["4400000000000000001", "4400000000000000002"]);
+  assert.deepEqual(parseDiscordDeletes({ id: "x", channel_id: "bad" }, 7), []);
+  assert.deepEqual(discordProvider.reports, { edits: true, deletions: true });
 });

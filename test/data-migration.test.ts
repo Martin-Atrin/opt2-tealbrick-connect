@@ -1,0 +1,38 @@
+// Migration 0011 renumbers the inbound log's `rev` per account in ONE pass (window function + UPDATE FROM). A correlated
+// COUNT(*) per row was quadratic (40k rows 4.5 s, 200k rows minutes) and would stall the start of a large log.
+import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { test } from "node:test";
+
+import { root } from "./helpers.ts";
+
+const dir = join(root, "migrations");
+const sql = (name: string) => readFileSync(join(dir, name), "utf8");
+
+test("migration 0011 renumbers 200 000 log rows (5 accounts) in under 5 s, per account 1..n in the old order", () => {
+  const db = new DatabaseSync(":memory:");
+  const files = readdirSync(dir).filter((n) => n.endsWith(".sql")).sort();
+  for (const f of files.filter((n) => n < "0010")) db.exec(sql(f));
+  for (let a = 0; a < 5; a++) {
+    db.exec(`INSERT INTO connect_accounts (id, service, source, kind, label, owner_agent, status, detail, created_at, updated_at) VALUES ('a${a}','telegram','channel','as_itself','x','agt_1','connected','',1,1)`);
+  }
+  db.exec(`WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 200000)
+    INSERT INTO connect_channel_inbox (account_id, conversation, conversation_type, message_id, sender_id, sender_name, text, sent_at, received_at)
+    SELECT 'a' || (n % 5), 'c', 'channel', 'm' || n, 'u', 'U', 't', n, n FROM c`);
+  db.exec(sql("0010_data_ops.sql"));
+  const started = performance.now();
+  db.exec(sql("0011_data_ops_review.sql"));
+  const ms = performance.now() - started;
+  console.log(`# migration 0011 on 200000 rows: ${Math.round(ms)} ms`);
+  assert.ok(ms < 5000, `0011 took ${Math.round(ms)} ms`);
+  // 40 000 rows per account, numbered 1..40000 in arrival order, and the counters continue above them
+  for (let a = 0; a < 5; a++) {
+    const r = db.prepare("SELECT COUNT(*) AS n, MIN(rev) AS lo, MAX(rev) AS hi, COUNT(DISTINCT rev) AS d FROM connect_channel_inbox WHERE account_id = ?").get(`a${a}`);
+    assert.deepEqual({ ...r }, { n: 40_000, lo: 1, hi: 40_000, d: 40_000 });
+    assert.equal(db.prepare("SELECT last FROM connect_account_rev WHERE account_id = ?").get(`a${a}`)?.last, 40_000);
+  }
+  const order = db.prepare("SELECT message_id FROM connect_channel_inbox WHERE account_id = 'a1' ORDER BY rev LIMIT 3").all().map((r) => r.message_id);
+  assert.deepEqual(order, ["m1", "m6", "m11"]);
+});

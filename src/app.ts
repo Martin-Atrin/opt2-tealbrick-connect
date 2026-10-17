@@ -15,7 +15,10 @@ import { parsePubkey } from "./channels/buzz/nostr.ts";
 import { BuzzRefusal, BuzzRelay } from "./channels/buzz/relay.ts";
 import { ChannelError, type ChannelNet, type ChannelProvider, type ChannelService as ChannelServiceId } from "./channels/provider.ts";
 import { channelProviders } from "./channels/registry.ts";
-import { ChannelHub, isChannelService } from "./channels/service.ts";
+import { ChannelHub, INBOX_RETENTION_MS, isChannelService } from "./channels/service.ts";
+import { DATA_OPS_UNAVAILABLE_CODE, DATA_OPS_UNAVAILABLE_MESSAGE, DATA_OPS_VERIFIED_PRODUCT_SUPPORTED, verifiedAppProduct } from "./data/caller.ts";
+import { DataError, MESSAGES_DATASET, messagesCatalog, type PullInput, pullMessages } from "./data/messages.ts";
+import { DATA_APPS, isDataApp, SHARE_LEVELS, type ShareLevel, ShareStore } from "./data/shares.ts";
 import { classifyMcpTool, isSendTool, recipientsOf } from "./effect.ts";
 import { gmailContentRead, holdSummary, mailFromArgs, mailFromGmail, renderHoldView } from "./hold-view.ts";
 import { isSenderChannel, SENDER_CHANNELS, SENDERS_PAGE, type SenderChannel, SenderStore, senderScopeId } from "./senders.ts";
@@ -75,6 +78,12 @@ export interface ConnectEnv {
   channelNet?: ChannelNet;
   /** Manifest setting `buzz_relays` (env CONNECT_BUZZ_RELAYS): ordered relay list (C73; settings reach apps only as env, S6). */
   buzzRelays?: string | null;
+  /**
+   * TEST-ONLY seam for the data_* ops (C230 R3, Coordinator ruling): the verified product of an app caller. Production never
+   * sets it: `verifiedAppProduct` (src/data/caller.ts) answers null until the SDK offers the verified caller product, and
+   * then every data op answers `data_ops_unavailable` (503).
+   */
+  verifiedAppProduct?: (ctx: OpContext) => string | null;
   /** C133: the removed setting `buzz_relay_url` is still in the env (value never read); Buzz reports it clearly. */
   oldBuzzRelaySettingPresent?: boolean;
 }
@@ -104,6 +113,7 @@ interface Services {
   mcp: McpSource;
   channels: ChannelHub;
   senders: SenderStore;
+  shares: ShareStore;
 }
 
 export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
@@ -183,7 +193,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       },
       ...(ctx.log ? { log: ctx.log } : {}),
     });
-    const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp, channels, senders: new SenderStore(db) };
+    const built = { accounts, tools, secrets, composio, buzz, relay, catalog, mcp, channels, senders: new SenderStore(db), shares: new ShareStore(db) };
     cache = { db, services: built };
     return built;
   };
@@ -197,6 +207,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       if (error instanceof CatalogError) fail(error.code, error.message, error.code === "catalog_app_unknown" || error.code === "tool_unknown" ? 404 : 400);
       if (error instanceof BuzzRefusal) fail(error.code, error.message, error.httpStatus);
       if (error instanceof ChannelError) fail(error.code, error.message, error.httpStatus);
+      if (error instanceof DataError) fail(error.code, error.message, error.httpStatus);
       if (error instanceof UpstreamError) fail(error.code, error.message.slice(0, 300), error.status && error.status < 500 ? 409 : 502);
       if (error instanceof OAuthError) fail(error.code, error.message, 502);
       if (error instanceof McpError) fail(error.code, error.message, error.status && error.status < 500 ? 409 : 502);
@@ -472,7 +483,148 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     },
   };
 
+  // ── data_* op family (C230 R3): apps only, one confused-deputy rule for all three ops ──
+
+  /** Data ops need the verified caller product. Without it (today, SDK < 0.1.27) every data op refuses every caller. */
+  const dataOpsAvailable = DATA_OPS_VERIFIED_PRODUCT_SUPPORTED || env.verifiedAppProduct !== undefined;
+  /** The calling app's verified product id, or null for an app that is not verified. Persons and agents: no_access. */
+  const dataCaller = (ctx: OpContext): string | null => {
+    if (!dataOpsAvailable) return fail(DATA_OPS_UNAVAILABLE_CODE, DATA_OPS_UNAVAILABLE_MESSAGE, 503);
+    if (ctx.caller.type !== "app") return fail("no_access", "The data operations serve apps only. Agents and people cannot use them.", 403);
+    return (env.verifiedAppProduct ?? verifiedAppProduct)(ctx);
+  };
+  /** The ONE refusal for every account the calling app cannot see (unknown, not a chat account, not connected, not shared with it). */
+  const noSuchAccount = (): never => fail("not_found", "No such account.", 404);
+  const dataAccount = (s: Services, ctx: OpContext, raw: unknown, need: "available" | "shared", note?: { product?: string | null }): { account: Account; level: "available" | "shared"; product: string; since: number | null } => {
+    const product = dataCaller(ctx);
+    if (note) note.product = product;
+    const id = str(raw);
+    const account = id ? s.accounts.get(id) : null;
+    if (!product || !account || account.source !== "channel" || account.status !== "connected") return noSuchAccount();
+    const share = s.shares.get(account.id, product);
+    if (!share) return noSuchAccount();
+    if (need === "shared" && share.level !== "shared") fail("scope_denied", "This account is shared with you for its catalog only. Ask the owner to share it for reading.", 403);
+    return { account, level: share.level, product, since: share.includeHistory ? null : share.setAt };
+  };
+  const shareView = (r: { product: string; level: string; includeHistory: boolean; setAt: number }) => ({
+    product: r.product,
+    level: r.level,
+    includeHistory: r.includeHistory,
+    setAt: new Date(r.setAt).toISOString(),
+  });
+  const messagesDeps = (s: Services, ctx: OpContext) => ({
+    db: ctx.db,
+    log: ctx.log,
+    botId: (accountId: string) => s.channels.bot(accountId)?.botId ?? null,
+    history: (service: string) => {
+      try {
+        return s.channels.provider(service).readsHistory === true;
+      } catch {
+        return false;
+      }
+    },
+  });
+  const timeArg = (value: unknown, name: string): number | null => {
+    const v = str(value);
+    if (v === undefined) return null;
+    const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/u.test(v) ? Date.parse(v) : Number.NaN;
+    return Number.isNaN(ms) ? fail(`${name}_invalid`, `${name} must be an RFC 3339 time, for example 2026-10-17T10:00:00Z.`) : ms;
+  };
+
+  interface AuditNote {
+    product?: string | null;
+    account?: string;
+    dataset?: string;
+    rows?: number;
+    quarantined?: number;
+  }
+  /**
+   * One audit line per data_* call, refused ones too (outcome = the refusal code): who called (type and id), which op, the
+   * verified product when there is one, account, dataset, row count. Never message text. The account and dataset are
+   * recorded as the caller named them (clipped), because a refusal has no resolved account.
+   */
+  const audited = async (op: string, ctx: OpContext, input: Json, body: (note: AuditNote) => Promise<Json>): Promise<Json> => {
+    const i = asInput(input);
+    const note: AuditNote = {
+      ...(typeof i.account === "string" ? { account: i.account.slice(0, 64) } : {}),
+      ...(typeof i.dataset === "string" ? { dataset: i.dataset.slice(0, 64) } : {}),
+    };
+    const record = (outcome: string) => {
+      try {
+        ctx.db
+          .prepare("INSERT INTO connect_data_audit (at, op, outcome, caller_type, caller_id, product, account_id, dataset, row_count, quarantined) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(Date.now(), op, outcome, ctx.caller.type, ctx.caller.id, note.product ?? null, note.account ?? null, note.dataset ?? null, note.rows ?? 0, note.quarantined ?? 0);
+        ctx.log.info(op, { outcome, caller: ctx.caller.type, app: note.product ?? null, account: note.account ?? null, rows: note.rows ?? 0, quarantined: note.quarantined ?? 0 });
+      } catch (error) {
+        // Not silent: the call itself goes on, the failed audit line is an error in the log.
+        ctx.log.error("data audit line could not be written", { op, error: error instanceof Error ? error.message.slice(0, 120) : "unknown" });
+      }
+    };
+    try {
+      const out = await body(note);
+      record("ok");
+      return out;
+    } catch (error) {
+      record(typeof (error as { code?: unknown }).code === "string" ? String((error as { code: string }).code).slice(0, 64) : "error");
+      throw error;
+    }
+  };
+
   const handlers: Record<string, Handler | HandlerSpec> = {
+    // ── agent-audience data ops (apps only; the handler refuses everyone else) ──
+    async data_accounts_list(input, ctx) {
+      return audited("data_accounts_list", ctx, input, async (note) =>
+        guard(async () => {
+          const s = services(ctx);
+          const product = dataCaller(ctx);
+          note.product = product;
+          const accounts = (product ? s.shares.forProduct(product) : []).flatMap((share) => {
+            const a = s.accounts.get(share.account);
+            return a?.source === "channel" && a.status === "connected"
+              ? [{ account: a.id, service: a.service, label: a.label, kinds: ["messages"], level: share.level }]
+              : [];
+          });
+          return { accounts } as unknown as Json;
+        }),
+      );
+    },
+    async data_catalog(input, ctx) {
+      return audited("data_catalog", ctx, input, async (note) =>
+        guard(async () => {
+          const s = services(ctx);
+          const { account, level } = dataAccount(s, ctx, asInput(input).account, "available", note);
+          note.account = account.id;
+          const history = messagesDeps(s, ctx).history(account.service);
+          const reports = s.channels.provider(account.service).reports ?? { edits: false, deletions: false };
+          return { account: account.id, service: account.service, label: account.label, level, datasets: [messagesCatalog(ctx.db, account, history, INBOX_RETENTION_MS, reports)], untrusted: true } as unknown as Json;
+        }),
+      );
+    },
+    async data_pull(input, ctx) {
+      return audited("data_pull", ctx, input, async (note) =>
+        guard(async () => {
+          const s = services(ctx);
+          const i = asInput(input);
+          const { account, since: ingestedFrom } = dataAccount(s, ctx, i.account, "shared", note);
+          note.account = account.id;
+          if (str(i.dataset) !== MESSAGES_DATASET) fail("not_found", "No such dataset on this account.", 404);
+          const direction = i.direction === "backward" ? "backward" : "forward";
+          const pull: PullInput = {
+            direction,
+            cursor: str(i.cursor) ?? null,
+            since: timeArg(i.since, "since"),
+            until: timeArg(i.until, "until"),
+            ingestedFrom,
+            limit: typeof i.limit === "number" ? i.limit : 100,
+          };
+          const page = pullMessages(messagesDeps(s, ctx), account, pull);
+          note.rows = page.rows.length;
+          note.quarantined = page.quarantined ?? 0;
+          return { ...page, schema: "messages/1", untrusted: true } as unknown as Json;
+        }),
+      );
+    },
+
     // ── agent ops ──
     accounts_list: {
       // No manifest scopeType: an agent with no account access yet gets an empty list, not a scope refusal.
@@ -858,7 +1010,30 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
     },
     async accounts_overview(_input, ctx) {
       const s = services(ctx);
-      return { accounts: s.accounts.list().map(accountView) };
+      // Chat accounts also list who the owner shared them with (C230 R3); `dataApps` are the apps one can share with.
+      const accounts = s.accounts.list().map((a) => (a.source === "channel" ? { ...accountView(a), shares: s.shares.forAccount(a.id).map(shareView) } : accountView(a)));
+      return { accounts, dataApps: Object.entries(DATA_APPS).map(([product, name]) => ({ product, name })), dataOpsAvailable } as unknown as Json;
+    },
+    // The owner (a person) decides which app sees which chat account. Agents cannot reach this op; an app cannot widen itself.
+    async account_app_share(input, ctx) {
+      return guard(async () => {
+        if (ctx.caller.type !== "person") fail("no_access", "Only the owner shares accounts with apps.", 403);
+        const s = services(ctx);
+        const i = asInput(input);
+        const id = str(i.account) ?? fail("account_required", "Pick the chat connection to share.");
+        const product = str(i.product) ?? fail("product_required", "Pick the app to share with.");
+        if (!isDataApp(product)) fail("product_unknown", `Pick an app that reads data: ${Object.values(DATA_APPS).join(" or ")}.`);
+        const level = str(i.level) as ShareLevel | undefined;
+        if (!level || !SHARE_LEVELS.includes(level)) fail("level_invalid", "Pick none, available or shared.");
+        const account = s.accounts.get(id);
+        if (account?.source !== "channel") fail("account_not_found", "No such chat connection.", 404);
+        if (level !== "none" && account?.status !== "connected") fail("channel_account_not_connected", "This chat connection is not connected. Connect it again first.", 409);
+        s.shares.set(id, product, level as ShareLevel, i.includeHistory === true);
+        ctx.log.info("account shared with an app", { account: id, product, level: level as string });
+        ctx.receipt.summary(`Sharing of “${account?.label ?? id}” with ${DATA_APPS[product]}: ${level === "none" ? "not shared" : level === "available" ? "names and counts only" : "messages, read only"}`);
+        ctx.receipt.meta({ account: id, product, level: level as string, includeHistory: i.includeHistory === true });
+        return { account: id, product, level, shares: s.shares.forAccount(id).map(shareView), dataOpsAvailable } as unknown as Json;
+      });
     },
     async account_connect(input, ctx) {
       return guard(async () => {
@@ -947,7 +1122,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
         .filter((a) => a.source === "channel")
         .map((a) => {
           const bot = s.channels.bot(a.id);
-          return { ...accountView(a), bot: bot ? { id: bot.botId, name: bot.botName, inbound: bot.inboundState, detail: bot.inboundDetail } : null };
+          return { ...accountView(a), bot: bot ? { id: bot.botId, name: bot.botName, inbound: bot.inboundState, detail: bot.inboundDetail, unmatchedChanges: bot.unmatchedChanges } : null };
         });
       return { accounts } as unknown as Json;
     },
@@ -1006,6 +1181,8 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
                 : account.source === "channel"
                   ? await s.channels.disconnect(account)
                   : s.accounts.update(id, { status: "revoked" });
+        // C230 R3: a disconnected account is shared with no app any more (a new connection starts at none).
+        s.shares.clearAccount(id);
         return { account: accountView(revoked) };
       });
     },
@@ -1225,6 +1402,7 @@ export function createConnectApp(env: ConnectEnv): SdkAppDefinition {
       await tetherBuzz(ctx.db, ctx.log);
       const tick = async () => {
         s.channels.purge();
+        ctx.db.prepare("DELETE FROM connect_data_audit WHERE at < ?").run(Date.now() - 90 * 24 * 60 * 60 * 1000);
         await runDueBuzzPosts(ctx.db, s.relay, ctx.log);
       };
       const timer = setInterval(() => void tick().catch((e: unknown) => ctx.log.warn("scheduler tick failed", { code: (e as { code?: string }).code ?? "error" })), 15_000);

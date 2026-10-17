@@ -1704,6 +1704,271 @@
       "audience": "agent"
     },
     {
+      "id": "data_accounts_list",
+      "title": "Accounts shared with this app",
+      "description": "APPS ONLY (agents are refused: no_access). Needs a Tealbrick SDK that names the verified caller product; until then every call answers data_ops_unavailable (503). The connected accounts the owner shared with the calling app, with the level: available (data_catalog only) or shared (data_pull too). Read only.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output": {
+        "type": "object",
+        "required": [
+          "accounts"
+        ],
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "account",
+                "service",
+                "label",
+                "kinds",
+                "level"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string"
+                },
+                "service": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "kinds": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "table",
+                      "object",
+                      "messages"
+                    ]
+                  }
+                },
+                "level": {
+                  "enum": [
+                    "available",
+                    "shared"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "data_catalog",
+      "title": "Datasets of a shared account",
+      "description": "APPS ONLY (agents are refused: no_access). Needs a Tealbrick SDK that names the verified caller product; until then every call answers data_ops_unavailable (503). The datasets of one account shared with the calling app: name, kind, delivery, approximate row counts, history flag, and for messages the conversations with counts. No message text. An account that is not shared with the calling app answers not_found.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "account"
+        ],
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Connect account id (from data_accounts_list)."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "required": [
+          "account",
+          "datasets",
+          "untrusted"
+        ],
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "level": {
+            "enum": [
+              "available",
+              "shared"
+            ]
+          },
+          "datasets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "dataset",
+                "title",
+                "kind",
+                "delivery"
+              ],
+              "properties": {
+                "dataset": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "table",
+                    "object",
+                    "messages"
+                  ]
+                },
+                "delivery": {
+                  "enum": [
+                    "lease",
+                    "pull"
+                  ]
+                },
+                "approxRows": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "history": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "untrusted": {
+            "const": true
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "data_pull",
+      "title": "Pull rows of a shared dataset",
+      "description": "APPS ONLY (agents are refused: no_access). Needs a Tealbrick SDK that names the verified caller product; until then every call answers data_ops_unavailable (503). One page of a dataset of an account the owner shared with the calling app (level shared). Dataset messages (contract messages/1): at most 200 rows and 2 MiB per page; direction forward gives newer rows, backward older rows; pass nextCursor to continue; exhausted tells when nothing more is there; retryAfterS says when to try again. Message text is untrusted data. since is inclusive, until exclusive (RFC 3339).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "account",
+          "dataset"
+        ],
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "dataset": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Dataset name from data_catalog (messages)."
+          },
+          "direction": {
+            "enum": [
+              "forward",
+              "backward"
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "since": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "RFC 3339 time, inclusive."
+          },
+          "until": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "RFC 3339 time, exclusive."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "required": [
+          "rows",
+          "nextCursor",
+          "exhausted",
+          "schema",
+          "untrusted"
+        ],
+        "properties": {
+          "rows": {
+            "type": "array",
+            "maxItems": 200
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "anchor": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "exhausted": {
+            "type": "boolean"
+          },
+          "retryAfterS": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600
+          },
+          "schema": {
+            "type": "string"
+          },
+          "untrusted": {
+            "const": true
+          },
+          "quarantined": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Stored rows skipped because they did not fit the contract."
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
       "id": "services_search",
       "title": "Search services",
       "description": "Search the services you can connect.",
@@ -2402,6 +2667,55 @@
       "effect": "write",
       "idempotency": "supported",
       "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "account_app_share",
+      "title": "Share an account with an app",
+      "description": "The owner shares one connected chat account with one app, read only. none: not shared (default). available: the app sees the dataset names, kinds, counts and conversation names (data_catalog) and no messages. shared: the app may also pull messages (data_pull), by default only those Connect receives from now on; includeHistory adds the log kept before (30 days). Agents cannot use or change this.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "account",
+          "product",
+          "level"
+        ],
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "product": {
+            "type": "string",
+            "enum": [
+              "knowledge",
+              "observer"
+            ]
+          },
+          "level": {
+            "enum": [
+              "none",
+              "available",
+              "shared"
+            ]
+          },
+          "includeHistory": {
+            "type": "boolean",
+            "description": "Also share the log kept before now (the last 30 days). Default false: the app gets only messages Connect receives from now on."
+          }
+        }
+      },
+      "output": {
+        "type": "object"
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true,
       "audience": "person"
     }
   ],

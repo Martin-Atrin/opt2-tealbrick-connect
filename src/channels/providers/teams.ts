@@ -519,8 +519,9 @@ function parseMessage(activity: Record<string, unknown>, c: TeamsCreds, net: Cha
   const from = asRecord(activity.from);
   const senderId = from?.id;
   if (typeof senderId !== "string" || !SENDER_ID.test(senderId)) return null;
-  // The bot itself and every other bot (role "bot" or a Bot Framework `28:` id) are ignored: no bot loops.
-  if (senderId.toLowerCase() === botId || from?.role === "bot" || senderId.startsWith("28:")) return null;
+  // The bot itself is ignored; another bot (role "bot" or a Bot Framework `28:` id) is flagged and never reaches agents (no bot loops).
+  if (senderId.toLowerCase() === botId) return null;
+  const senderIsBot = from?.role === "bot" || senderId.startsWith("28:");
   const messageId = activity.id;
   if (typeof messageId !== "string" || !MESSAGE_ID.test(messageId)) return null;
   const conversation = asRecord(activity.conversation);
@@ -551,6 +552,7 @@ function parseMessage(activity: Record<string, unknown>, c: TeamsCreds, net: Cha
     text: inboundText(activity, botId),
     sentAt: Number.isFinite(sent) ? sent : net.now(),
     mentions: teamsMentions(activity),
+    ...(senderIsBot ? { senderIsBot: true as const } : {}),
   };
 }
 
@@ -647,6 +649,10 @@ export const teamsProvider: ChannelProvider = {
       return { conversation: teamsConversationRef(serviceUrl, conversationId) };
     }),
 
+  // R3: messageUpdate / messageDelete activities are parsed when Teams sends them, but Teams sends them only in some
+  // installations (the bot needs the read-all permission in a team or chat), so not every edit or delete path is wired:
+  // data_catalog says edits: false, deletions: false and an edit or delete that does not match a logged message is counted.
+  reports: { edits: false, deletions: false },
   inbound: {
     kind: "webhook",
     async verifyWebhook(request, creds, net) {
@@ -663,9 +669,14 @@ export const teamsProvider: ChannelProvider = {
         throw unauthorized();
       }
       const reply = { status: 200, body: "" };
-      if (activity.type !== "message") return { messages: [], reply }; // conversationUpdate, installationUpdate, …
+      // R3: messageUpdate (an edit) and messageDelete reach the bot where Teams sends them (channels with the bot's
+      // read permission); conversationUpdate, installationUpdate, … are ignored.
+      if (activity.type !== "message" && activity.type !== "messageUpdate" && activity.type !== "messageDelete") return { messages: [], reply };
       const message = parseMessage(activity, c, net);
-      return { messages: message ? [message] : [], reply };
+      if (!message) return { messages: [], reply };
+      if (activity.type === "messageUpdate") return { messages: [{ ...message, change: { kind: "edit", at: message.sentAt } }], reply };
+      if (activity.type === "messageDelete") return { messages: [{ ...message, text: "", change: { kind: "delete" } }], reply };
+      return { messages: [message], reply };
     },
   },
 };
